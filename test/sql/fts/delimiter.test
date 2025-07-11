@@ -1,4 +1,4 @@
-# name: test/sql/fts/deliminator.test
+# name: test/sql/fts/delimiter.test
 # description: Test that we do not have a DELIM_JOIN in FTS
 # group: [fts]
 
