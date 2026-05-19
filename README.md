@@ -33,7 +33,7 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `input_table` | `VARCHAR` | Qualified name of specified table, e.g., `'table_name'` or `'main.table_name'` |
 | `input_id` | `VARCHAR` | Column name of document identifier, e.g., `'document_identifier'` |
 | `input_values…` | `VARCHAR` | Column names of the text fields to be indexed (vararg), e.g., `'text_field_1'`, `'text_field_2'`, ..., `'text_field_N'`, or `'\*'` for all columns in input_table of type `VARCHAR` |
-| `stemmer` | `VARCHAR` | The type of stemmer to be used. One of `'arabic'`, `'basque'`, `'catalan'`, `'danish'`, `'dutch'`, `'english'`, `'finnish'`, `'french'`, `'german'`, `'greek'`, `'hindi'`, `'hungarian'`, `'indonesian'`, `'irish'`, `'italian'`, `'lithuanian'`, `'nepali'`, `'norwegian'`, `'porter'`, `'portuguese'`, `'romanian'`, `'russian'`, `'serbian'`, `'spanish'`, `'swedish'`, `'tamil'`, `'turkish'`, or `'none'` if no stemming is to be used. Defaults to `'porter'` |
+| `stemmer` | `VARCHAR` | The type of stemmer to be used. One of `'arabic'`, `'armenian'`, `'basque'`, `'catalan'`, `'czech'`, `'danish'`, `'dutch'`, `'dutch_porter'`, `'english'`, `'esperanto'`, `'estonian'`, `'finnish'`, `'french'`, `'german'`, `'greek'`, `'hindi'`, `'hungarian'`, `'indonesian'`, `'irish'`, `'italian'`, `'lithuanian'`, `'nepali'`, `'norwegian'`, `'persian'`, `'polish'`, `'porter'`, `'portuguese'`, `'romanian'`, `'russian'`, `'serbian'`, `'sesotho'`, `'spanish'`, `'swedish'`, `'tamil'`, `'turkish'`, `'yiddish'`, or `'none'` if no stemming is to be used. Defaults to `'porter'` |
 | `stopwords` | `VARCHAR` | Qualified name of table containing a single `VARCHAR` column containing the desired stopwords, or `'none'` if no stopwords are to be used. Defaults to `'english'` for a pre-defined list of 571 English stopwords |
 | `ignore` | `VARCHAR` | Regular expression of patterns to be ignored. Defaults to `'(\\.|[^a-z])+'`, ignoring all escaped and non-alphabetic lowercase characters |
 | `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` |
@@ -85,7 +85,7 @@ Reduces words to their base. Used internally by the extension.
 | Name | Type | Description |
 |:--|:--|:----------|
 | `input_string` | `VARCHAR` | The column or constant to be stemmed. |
-| `stemmer` | `VARCHAR` | The type of stemmer to be used. One of `'arabic'`, `'basque'`, `'catalan'`, `'danish'`, `'dutch'`, `'english'`, `'finnish'`, `'french'`, `'german'`, `'greek'`, `'hindi'`, `'hungarian'`, `'indonesian'`, `'irish'`, `'italian'`, `'lithuanian'`, `'nepali'`, `'norwegian'`, `'porter'`, `'portuguese'`, `'romanian'`, `'russian'`, `'serbian'`, `'spanish'`, `'swedish'`, `'tamil'`, `'turkish'`, or `'none'` if no stemming is to be used. |
+| `stemmer` | `VARCHAR` | The type of stemmer to be used. One of `'arabic'`, `'armenian'`, `'basque'`, `'catalan'`, `'czech'`, `'danish'`, `'dutch'`, `'dutch_porter'`, `'english'`, `'esperanto'`, `'estonian'`, `'finnish'`, `'french'`, `'german'`, `'greek'`, `'hindi'`, `'hungarian'`, `'indonesian'`, `'irish'`, `'italian'`, `'lithuanian'`, `'nepali'`, `'norwegian'`, `'persian'`, `'polish'`, `'porter'`, `'portuguese'`, `'romanian'`, `'russian'`, `'serbian'`, `'sesotho'`, `'spanish'`, `'swedish'`, `'tamil'`, `'turkish'`, `'yiddish'`, or `'none'` if no stemming is to be used. |
 
 ## Example Usage
 
@@ -160,3 +160,14 @@ ORDER BY score DESC;
 
 > Warning The FTS index will not update automatically when input table changes.
 > A workaround of this limitation can be recreating the index to refresh.
+
+## Stemmers
+
+The extension bundles the [Snowball](https://snowballstem.org/) stemming
+library (vendored under `third_party/snowball/`).
+
+Starting with the upgrade to Snowball v3, the previously available
+`'german2'` and `'kraaij_pohlmann'` stemmers (legacy variants that were
+undocumented but accepted by the underlying library) have been removed
+upstream. If you relied on them, rebuild the FTS index with one of the
+documented stemmers instead.
