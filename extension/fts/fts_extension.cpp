@@ -28,7 +28,10 @@ static void StemFunction(DataChunk &args, ExpressionState &state, Vector &result
 		    struct sb_stemmer *s = sb_stemmer_new(stemmer.GetString().c_str(), "UTF_8");
 		    if (s == 0) {
 			    const char **stemmers = sb_stemmer_list();
-			    size_t n_stemmers = 27;
+			    size_t n_stemmers = 0;
+			    while (stemmers[n_stemmers] != nullptr) {
+				    n_stemmers++;
+			    }
 			    throw InvalidInputException(
 			        "Unrecognized stemmer '%s'. Supported stemmers are: ['%s'], or use 'none' for no stemming",
 			        stemmer.GetString(),
