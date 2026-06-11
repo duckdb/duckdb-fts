@@ -50,8 +50,8 @@ static string GetQualifiedTableName(const QualifiedName &qname) {
 
 static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
-  return {prefix + "00_docs", prefix + "10_dict_insert",
-          prefix + "20_terms", prefix + "30_dict_df", prefix + "40_stats"};
+  return {prefix + "00_docs", prefix + "10_dict_insert", prefix + "20_terms",
+          prefix + "30_dict_df", prefix + "40_stats"};
 }
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
@@ -289,9 +289,9 @@ static string DropFTSTriggersScript(const QualifiedName &qname) {
   vector<string> statements;
   auto input_table = GetQualifiedTableName(qname);
   for (auto &trigger_name : GetFTSTriggerNames(qname)) {
-    statements.push_back(StringUtil::Format("DROP TRIGGER IF EXISTS %s ON %s;",
-                                            SQLIdentifier::ToString(trigger_name),
-                                            input_table));
+    statements.push_back(
+        StringUtil::Format("DROP TRIGGER IF EXISTS %s ON %s;",
+                           SQLIdentifier::ToString(trigger_name), input_table));
   }
   return StringUtil::Join(statements, "\n");
 }
@@ -421,9 +421,9 @@ static string InsertTriggerScript(const QualifiedName &qname,
   vector<string> input_value_selects;
   vector<string> tokenize_fields;
   for (auto &input_value : input_values) {
-    input_value_selects.push_back(StringUtil::Format("fts_new_rows.%s AS %s",
-                                                     SQLIdentifier::ToString(input_value),
-                                                     SQLIdentifier::ToString(input_value)));
+    input_value_selects.push_back(StringUtil::Format(
+        "fts_new_rows.%s AS %s", SQLIdentifier::ToString(input_value),
+        SQLIdentifier::ToString(input_value)));
     auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
                                      SQLIdentifier::ToString(input_value));
     query = StringUtil::Replace(query, "%input_value_string%",
@@ -431,17 +431,19 @@ static string InsertTriggerScript(const QualifiedName &qname,
     tokenize_fields.push_back(query);
   }
 
-  docs_new_docs_cte =
-      StringUtil::Replace(docs_new_docs_cte, "%input_value_select_list%",
-                          StringUtil::Join(input_value_selects, ",\n                   "));
-  token_new_docs_cte =
-      StringUtil::Replace(token_new_docs_cte, "%input_value_select_list%",
-                          StringUtil::Join(input_value_selects, ",\n                   "));
-  token_ctes = StringUtil::Replace(token_ctes, "%new_docs_cte%", token_new_docs_cte);
+  docs_new_docs_cte = StringUtil::Replace(
+      docs_new_docs_cte, "%input_value_select_list%",
+      StringUtil::Join(input_value_selects, ",\n                   "));
+  token_new_docs_cte = StringUtil::Replace(
+      token_new_docs_cte, "%input_value_select_list%",
+      StringUtil::Join(input_value_selects, ",\n                   "));
+  token_ctes =
+      StringUtil::Replace(token_ctes, "%new_docs_cte%", token_new_docs_cte);
   token_ctes =
       StringUtil::Replace(token_ctes, "%union_fields_query%",
                           StringUtil::Join(tokenize_fields, " UNION ALL "));
-  result = StringUtil::Replace(result, "%docs_new_docs_cte%", docs_new_docs_cte);
+  result =
+      StringUtil::Replace(result, "%docs_new_docs_cte%", docs_new_docs_cte);
   result =
       StringUtil::Replace(result, "%union_fields_query%",
                           StringUtil::Join(tokenize_fields, " UNION ALL "));
@@ -458,9 +460,10 @@ static string InsertTriggerScript(const QualifiedName &qname,
                                SQLIdentifier::ToString(trigger_names[3]));
   result = StringUtil::Replace(result, "%trigger_40_stats%",
                                SQLIdentifier::ToString(trigger_names[4]));
-  result = StringUtil::Replace(result, "%input_table%", GetQualifiedTableName(qname));
-  result =
-      StringUtil::Replace(result, "%input_id%", SQLIdentifier::ToString(input_id));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
   return result;
 }
 
