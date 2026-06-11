@@ -476,9 +476,9 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                              const vector<string> &input_values,
                              const string &stemmer, const string &stopwords,
                              const string &ignore, bool strip_accents,
-                             bool lower) {
+                             bool lower, bool incremental) {
   string result;
-  if (SupportsFTSTriggers(context, qname)) {
+  if (incremental) {
     result += DropFTSTriggersScript(qname);
   }
   result += SchemaSetupScript();
@@ -486,7 +486,7 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   result += TokenizeMacroScript(ignore, strip_accents, lower);
   result += IndexTablesScript(input_values);
   result += MatchMacroScript();
-  if (SupportsFTSTriggers(context, qname)) {
+  if (incremental) {
     result += InsertTriggerScript(qname, input_id, input_values);
   }
 
@@ -559,6 +559,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   const bool strip_accents = get_bool("strip_accents", true);
   const bool lower = get_bool("lower", true);
   const bool overwrite = get_bool("overwrite", false);
+  const bool incremental = get_bool("incremental", false);
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
@@ -606,9 +607,16 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
     throw InvalidInputException(
         "at least one column must be supplied for indexing!");
   }
+  if (incremental && !SupportsFTSTriggers(context, qname)) {
+    throw InvalidInputException(
+        "incremental FTS indexes require trigger support. Persistent DuckDB "
+        "databases must use storage version v2.0.0 or higher; reattach/create "
+        "the database with STORAGE_VERSION 'v2.0.0', or omit incremental=true "
+        "to create a rebuild-only FTS index.");
+  }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
-                        ignore, strip_accents, lower);
+                        ignore, strip_accents, lower, incremental);
 }
 
 } // namespace duckdb

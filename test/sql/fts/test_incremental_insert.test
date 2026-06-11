@@ -9,13 +9,33 @@ require fts
 require no_alternative_verify
 
 statement ok
+CREATE TABLE static_docs (id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO static_docs VALUES ('doc1', 'quacking')
+
+statement ok
+PRAGMA create_fts_index('static_docs', 'id', 'body', stemmer='porter', stopwords='none')
+
+statement ok
+INSERT INTO static_docs VALUES ('doc2', 'barking')
+
+query I
+SELECT count(*) FROM fts_main_static_docs.docs
+----
+1
+
+statement ok
+PRAGMA drop_fts_index('static_docs')
+
+statement ok
 CREATE TABLE docs (id VARCHAR, body VARCHAR)
 
 statement ok
 INSERT INTO docs VALUES ('doc1', 'quacking quacking quacking'), ('doc2', 'barking barking barking barking')
 
 statement ok
-PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none')
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
 
 # baseline: two docs with porter-stemmed terms
 query III
@@ -134,7 +154,7 @@ SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_docs'
 0
 
 statement ok
-PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none')
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
 
 # doc4 is now in the index (full rebuild)
 query I
@@ -144,7 +164,7 @@ SELECT count(*) FROM fts_main_docs.docs
 
 # overwrite drops the old trigger and recreates it; insert after overwrite still updates index
 statement ok
-PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', overwrite=true)
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', overwrite=true, incremental=true)
 
 statement ok
 INSERT INTO docs VALUES ('doc5', 'hissing hissing hissing hissing hissing')
