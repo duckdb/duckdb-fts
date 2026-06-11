@@ -1,0 +1,155 @@
+# name: test/sql/fts/test_incremental_insert.test
+# description: Test that inserting into an indexed table updates docs, dict, terms, and stats
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE docs (id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO docs VALUES ('doc1', 'quacking quacking quacking'), ('doc2', 'barking barking barking barking')
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none')
+
+# baseline: two docs with porter-stemmed terms
+query III
+SELECT name, docid, len FROM fts_main_docs.docs
+----
+doc1	0	3
+doc2	1	4
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+bark	1
+quack	1
+
+# insert a new document that shares 'bark' with doc2
+statement ok
+INSERT INTO docs VALUES ('doc3', 'barking meowing meowing')
+
+# new doc appears in docs with correct len
+query III rowsort
+SELECT name, docid, len FROM fts_main_docs.docs
+----
+doc1	0	3
+doc2	1	4
+doc3	2	3
+
+# 'bark' df incremented, 'meow' added as new term
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+bark	2
+meow	1
+quack	1
+
+# stats updated
+query II
+SELECT num_docs, avgdl FROM fts_main_docs.stats
+----
+3	3.333333333333333
+
+# match_bm25 returns the new document for a term only it contains
+query I
+SELECT id FROM (SELECT *, fts_main_docs.match_bm25(id, 'meowing') AS score FROM docs) sq
+WHERE score IS NOT NULL
+----
+doc3
+
+# multi-row insert updates every FTS table
+statement ok
+INSERT INTO docs VALUES ('doc6', 'barking chirping chirping'), ('doc7', 'meowing quacking quacking')
+
+query III rowsort
+SELECT name, docid, len FROM fts_main_docs.docs
+----
+doc1	0	3
+doc2	1	4
+doc3	2	3
+doc6	3	3
+doc7	4	3
+
+query II
+SELECT fieldid, field FROM fts_main_docs.fields
+----
+0	body
+
+query I
+SELECT count(*) FROM fts_main_docs.stopwords
+----
+0
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+bark	3
+chirp	1
+meow	2
+quack	2
+
+query III rowsort
+SELECT d.name, dict.term, count(*) AS tf
+FROM fts_main_docs.terms AS t
+JOIN fts_main_docs.docs AS d ON t.docid = d.docid
+JOIN fts_main_docs.dict AS dict ON t.termid = dict.termid
+GROUP BY d.name, dict.term
+----
+doc1	quack	3
+doc2	bark	4
+doc3	bark	1
+doc3	meow	2
+doc6	bark	1
+doc6	chirp	2
+doc7	meow	1
+doc7	quack	2
+
+query II
+SELECT num_docs, avgdl FROM fts_main_docs.stats
+----
+5	3.2
+
+query I rowsort
+SELECT id FROM (SELECT *, fts_main_docs.match_bm25(id, 'chirping') AS score FROM docs) sq
+WHERE score IS NOT NULL
+----
+doc6
+
+# drop removes the trigger so a subsequent insert does not update the index
+statement ok
+PRAGMA drop_fts_index('docs')
+
+statement ok
+INSERT INTO docs VALUES ('doc4', 'squawking squawking')
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_docs'
+----
+0
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none')
+
+# doc4 is now in the index (full rebuild)
+query I
+SELECT count(*) FROM fts_main_docs.docs
+----
+6
+
+# overwrite drops the old trigger and recreates it; insert after overwrite still updates index
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', overwrite=true)
+
+statement ok
+INSERT INTO docs VALUES ('doc5', 'hissing hissing hissing hissing hissing')
+
+query II rowsort
+SELECT name, len FROM fts_main_docs.docs WHERE name = 'doc5'
+----
+doc5	5
