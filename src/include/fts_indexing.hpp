@@ -13,8 +13,10 @@
 namespace duckdb {
 
 struct FTSIndexing {
-	static string DropFTSIndexQuery(ClientContext &context, const FunctionParameters &parameters);
-	static string CreateFTSIndexQuery(ClientContext &context, const FunctionParameters &parameters);
+  static string DropFTSIndexQuery(ClientContext &context,
+                                  const FunctionParameters &parameters);
+  static string CreateFTSIndexQuery(ClientContext &context,
+                                    const FunctionParameters &parameters);
 };
 
 } // namespace duckdb
