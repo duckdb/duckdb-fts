@@ -25,6 +25,4 @@ source_files += [
         'third_party/snowball/runtime/utilities.c',
     ]
 ]
-source_files += sorted(
-    glob.glob(os.path.sep.join(['third_party', 'snowball', 'src_c', 'stem_*.c']))
-)
+source_files += sorted(glob.glob(os.path.sep.join(['third_party', 'snowball', 'src_c', 'stem_*.c'])))

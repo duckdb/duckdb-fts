@@ -5,7 +5,7 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(FTSExtension)
 
-set(EXTENSION_BASE_FOLDER "extension/fts")
+set(EXTENSION_BASE_FOLDER "src")
 set(SNOWBALL_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/third_party/snowball")
 include_directories(
     ${EXTENSION_BASE_FOLDER}/include
