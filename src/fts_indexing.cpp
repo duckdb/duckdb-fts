@@ -4,9 +4,13 @@
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/sql_identifier.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/parser/qualified_name.hpp"
+#include "duckdb/storage/storage_info.hpp"
+#include "duckdb/storage/storage_manager.hpp"
 
 namespace duckdb {
 
@@ -27,11 +31,46 @@ static string GetFTSSchemaName(const QualifiedName &qname) {
 }
 
 static string GetFTSSchema(const QualifiedName &qname) {
-  auto result = IsInvalidCatalog(qname.catalog)
-                    ? string("")
-                    : qname.catalog.GetIdentifierName() + ".";
-  result += GetFTSSchemaName(qname);
+  auto result =
+      IsInvalidCatalog(qname.catalog)
+          ? string("")
+          : SQLIdentifier::ToString(qname.catalog.GetIdentifierName()) + ".";
+  result += SQLIdentifier::ToString(GetFTSSchemaName(qname));
   return result;
+}
+
+static string GetQualifiedTableName(const QualifiedName &qname) {
+  vector<string> parts;
+  if (!IsInvalidCatalog(qname.catalog)) {
+    parts.push_back(SQLIdentifier::ToString(qname.catalog.GetIdentifierName()));
+  }
+  parts.push_back(SQLIdentifier::ToString(qname.schema.GetIdentifierName()));
+  parts.push_back(SQLIdentifier::ToString(qname.name.GetIdentifierName()));
+  return StringUtil::Join(parts, ".");
+}
+
+static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
+  auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
+  return {prefix + "00_docs", prefix + "10_dict_insert", prefix + "20_terms",
+          prefix + "30_dict_df", prefix + "40_stats"};
+}
+
+static bool TableExists(ClientContext &context, const QualifiedName &qname) {
+  return Catalog::GetEntry<TableCatalogEntry>(
+             context, qname.catalog, qname.schema, qname.name,
+             OnEntryNotFound::RETURN_NULL) != nullptr;
+}
+
+static bool SupportsFTSTriggers(ClientContext &context,
+                                const QualifiedName &qname) {
+  auto &catalog = Catalog::GetCatalog(context, qname.catalog);
+  auto &attached = catalog.GetAttached();
+  if (!attached.HasStorageManager()) {
+    return true;
+  }
+  auto &storage_manager = attached.GetStorageManager();
+  return storage_manager.InMemory() ||
+         storage_manager.GetStorageVersion() >= StorageVersion::V2_0_0;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,12 +118,13 @@ static string TokenizeMacroScript(const string &ignore, bool strip_accents,
   return "CREATE MACRO %fts_schema%.tokenize(s) AS " + expr + ";";
 }
 
-static string IndexTablesScript(const vector<string> &input_values) {
+static string IndexTablesScript(const string &input_id,
+                                const vector<string> &input_values) {
   // clang-format off
 	string result = R"(
         CREATE TABLE %fts_schema%.docs AS (
             SELECT rowid AS docid,
-                   "%input_id%" AS name
+                   %input_id% AS name
             FROM %input_table%
         );
 
@@ -154,9 +194,9 @@ static string IndexTablesScript(const vector<string> &input_values) {
 
 	// Each field gets its own tokenize sub-query; they are unioned to retain the source field.
 	string tokenize_field_query = R"(
-        SELECT unnest(%fts_schema%.tokenize(fts_ii."%input_value%")) AS w,
+        SELECT unnest(%fts_schema%.tokenize(fts_ii.%input_value%)) AS w,
                rowid AS docid,
-               (SELECT fieldid FROM %fts_schema%.fields WHERE field = '%input_value%') AS fieldid
+               (SELECT fieldid FROM %fts_schema%.fields WHERE field = %input_value_string%) AS fieldid
         FROM %input_table% AS fts_ii
     )";
   // clang-format on
@@ -164,16 +204,21 @@ static string IndexTablesScript(const vector<string> &input_values) {
   vector<string> field_values;
   vector<string> tokenize_fields;
   for (idx_t i = 0; i < input_values.size(); i++) {
-    field_values.push_back(
-        StringUtil::Format("(%i, '%s')", i, input_values[i]));
-    tokenize_fields.push_back(StringUtil::Replace(
-        tokenize_field_query, "%input_value%", input_values[i]));
+    field_values.push_back(StringUtil::Format(
+        "(%i, %s)", i, SQLString::ToString(input_values[i])));
+    auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
+                                     SQLIdentifier::ToString(input_values[i]));
+    query = StringUtil::Replace(query, "%input_value_string%",
+                                SQLString::ToString(input_values[i]));
+    tokenize_fields.push_back(query);
   }
   result = StringUtil::Replace(result, "%field_values%",
                                StringUtil::Join(field_values, ", "));
   result =
       StringUtil::Replace(result, "%union_fields_query%",
                           StringUtil::Join(tokenize_fields, " UNION ALL "));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
   return result;
 }
 
@@ -247,6 +292,188 @@ static string MatchMacroScript() {
   // clang-format on
 }
 
+static string DropFTSTriggersScript(const QualifiedName &qname) {
+  vector<string> statements;
+  auto input_table = GetQualifiedTableName(qname);
+  for (auto &trigger_name : GetFTSTriggerNames(qname)) {
+    statements.push_back(
+        StringUtil::Format("DROP TRIGGER IF EXISTS %s ON %s;",
+                           SQLIdentifier::ToString(trigger_name), input_table));
+  }
+  return StringUtil::Join(statements, "\n");
+}
+
+static string InsertTriggerScript(const QualifiedName &qname,
+                                  const string &input_id,
+                                  const vector<string> &input_values) {
+  // clang-format off
+	string docs_new_docs_cte = R"(
+        fts_new_docs AS (
+            SELECT COALESCE((SELECT max(docid) + 1 FROM %fts_schema%.docs), 0)
+                       + row_number() OVER (ORDER BY fts_new_rows.%input_id%) - 1 AS docid,
+                   fts_new_rows.%input_id% AS name,
+                   %input_value_select_list%
+            FROM fts_new_rows
+        )
+    )";
+
+	string token_new_docs_cte = R"(
+        fts_new_docs AS (
+            SELECT (SELECT max(docid) - (SELECT count(*) FROM fts_new_rows) + 1 FROM %fts_schema%.docs)
+                       + row_number() OVER (ORDER BY fts_new_rows.%input_id%) - 1 AS docid,
+                   fts_new_rows.%input_id% AS name,
+                   %input_value_select_list%
+            FROM fts_new_rows
+        )
+    )";
+
+	string tokenize_field_query = R"(
+        SELECT unnest(%fts_schema%.tokenize(fts_ii.%input_value%)) AS w,
+               fts_ii.docid AS docid,
+               (SELECT fieldid FROM %fts_schema%.fields WHERE field = %input_value_string%) AS fieldid
+        FROM fts_new_docs AS fts_ii
+    )";
+
+	string token_ctes = R"(
+        WITH %new_docs_cte%,
+        tokenized AS (
+            %union_fields_query%
+        ),
+        stemmed_stopped AS (
+            SELECT stem(t.w, '%stemmer%') AS term,
+                   t.docid AS docid,
+                   t.fieldid AS fieldid
+            FROM tokenized AS t
+            WHERE t.w NOT NULL
+              AND len(t.w) > 0
+              AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+        )
+    )";
+
+	string result = R"(
+        CREATE TRIGGER %trigger_00_docs% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.docs (docid, name, len)
+            WITH %docs_new_docs_cte%,
+            tokenized AS (
+                %union_fields_query%
+            ),
+            stemmed_stopped AS (
+                SELECT stem(t.w, '%stemmer%') AS term,
+                       t.docid AS docid,
+                       t.fieldid AS fieldid
+                FROM tokenized AS t
+                WHERE t.w NOT NULL
+                  AND len(t.w) > 0
+                  AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+            ),
+            lengths AS (
+                SELECT docid, count(term) AS len
+                FROM stemmed_stopped
+                GROUP BY docid
+            )
+            SELECT nd.docid,
+                   nd.name,
+                   COALESCE(l.len, 0) AS len
+            FROM fts_new_docs AS nd
+            LEFT JOIN lengths AS l ON nd.docid = l.docid;
+
+        CREATE TRIGGER %trigger_10_dict_insert% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.dict (termid, term, df)
+            %token_ctes%,
+            new_terms AS (
+                SELECT DISTINCT term
+                FROM stemmed_stopped
+                WHERE term NOT IN (SELECT term FROM %fts_schema%.dict)
+                ORDER BY term
+            )
+            SELECT (SELECT COALESCE(max(termid) + 1, 0) FROM %fts_schema%.dict) + row_number() OVER () - 1 AS termid,
+                   term,
+                   0 AS df
+            FROM new_terms;
+
+        CREATE TRIGGER %trigger_20_terms% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.terms (docid, fieldid, termid)
+            %token_ctes%
+            SELECT ss.docid,
+                   ss.fieldid,
+                   d.termid
+            FROM stemmed_stopped AS ss
+            JOIN %fts_schema%.dict AS d ON ss.term = d.term;
+
+        CREATE TRIGGER %trigger_30_dict_df% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.dict AS d
+            SET df = (
+                SELECT count(DISTINCT docid)
+                FROM %fts_schema%.terms AS t
+                WHERE d.termid = t.termid
+            );
+
+        CREATE TRIGGER %trigger_40_stats% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.stats
+            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
+                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
+    )";
+  // clang-format on
+
+  vector<string> input_value_selects;
+  vector<string> tokenize_fields;
+  for (auto &input_value : input_values) {
+    input_value_selects.push_back(StringUtil::Format(
+        "fts_new_rows.%s AS %s", SQLIdentifier::ToString(input_value),
+        SQLIdentifier::ToString(input_value)));
+    auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
+                                     SQLIdentifier::ToString(input_value));
+    query = StringUtil::Replace(query, "%input_value_string%",
+                                SQLString::ToString(input_value));
+    tokenize_fields.push_back(query);
+  }
+
+  docs_new_docs_cte = StringUtil::Replace(
+      docs_new_docs_cte, "%input_value_select_list%",
+      StringUtil::Join(input_value_selects, ",\n                   "));
+  token_new_docs_cte = StringUtil::Replace(
+      token_new_docs_cte, "%input_value_select_list%",
+      StringUtil::Join(input_value_selects, ",\n                   "));
+  token_ctes =
+      StringUtil::Replace(token_ctes, "%new_docs_cte%", token_new_docs_cte);
+  token_ctes =
+      StringUtil::Replace(token_ctes, "%union_fields_query%",
+                          StringUtil::Join(tokenize_fields, " UNION ALL "));
+  result =
+      StringUtil::Replace(result, "%docs_new_docs_cte%", docs_new_docs_cte);
+  result =
+      StringUtil::Replace(result, "%union_fields_query%",
+                          StringUtil::Join(tokenize_fields, " UNION ALL "));
+  result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
+
+  auto trigger_names = GetFTSTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_00_docs%",
+                               SQLIdentifier::ToString(trigger_names[0]));
+  result = StringUtil::Replace(result, "%trigger_10_dict_insert%",
+                               SQLIdentifier::ToString(trigger_names[1]));
+  result = StringUtil::Replace(result, "%trigger_20_terms%",
+                               SQLIdentifier::ToString(trigger_names[2]));
+  result = StringUtil::Replace(result, "%trigger_30_dict_df%",
+                               SQLIdentifier::ToString(trigger_names[3]));
+  result = StringUtil::Replace(result, "%trigger_40_stats%",
+                               SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Coordinator: assembles all parts and substitutes cross-cutting placeholders
 // ---------------------------------------------------------------------------
@@ -256,23 +483,25 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                              const vector<string> &input_values,
                              const string &stemmer, const string &stopwords,
                              const string &ignore, bool strip_accents,
-                             bool lower) {
+                             bool lower, bool incremental) {
   string result;
+  if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
+    result += DropFTSTriggersScript(qname);
+  }
   result += SchemaSetupScript();
   result += StopwordsScript(stopwords);
   result += TokenizeMacroScript(ignore, strip_accents, lower);
-  result += IndexTablesScript(input_values);
+  result += IndexTablesScript(input_id, input_values);
   result += MatchMacroScript();
+  if (incremental) {
+    result += InsertTriggerScript(qname, input_id, input_values);
+  }
 
   string fts_schema = GetFTSSchema(qname);
-  string input_table = qname.catalog == INVALID_CATALOG
-                           ? ""
-                           : StringUtil::Format("%s.", qname.catalog);
-  input_table += StringUtil::Format("%s.%s", qname.schema, qname.name);
+  string input_table = GetQualifiedTableName(qname);
 
   result = StringUtil::Replace(result, "%fts_schema%", fts_schema);
   result = StringUtil::Replace(result, "%input_table%", input_table);
-  result = StringUtil::Replace(result, "%input_id%", input_id);
   result = StringUtil::Replace(result, "%stemmer%", stemmer);
   return result;
 }
@@ -296,7 +525,13 @@ string FTSIndexing::DropFTSIndexQuery(ClientContext &context,
                            qname.name.GetIdentifierName());
   }
 
-  return StringUtil::Format("DROP SCHEMA %s CASCADE;", fts_schema);
+  string result;
+  if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
+    result += DropFTSTriggersScript(qname);
+    result += "\n";
+  }
+  result += StringUtil::Format("DROP SCHEMA %s CASCADE;", fts_schema);
+  return result;
 }
 
 string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
@@ -327,6 +562,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   const bool strip_accents = get_bool("strip_accents", true);
   const bool lower = get_bool("lower", true);
   const bool overwrite = get_bool("overwrite", false);
+  const bool incremental = get_bool("incremental", false);
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
@@ -374,9 +610,16 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
     throw InvalidInputException(
         "at least one column must be supplied for indexing!");
   }
+  if (incremental && !SupportsFTSTriggers(context, qname)) {
+    throw InvalidInputException(
+        "incremental FTS indexes require trigger support. Persistent DuckDB "
+        "databases must use storage version v2.0.0 or higher; reattach/create "
+        "the database with STORAGE_VERSION 'v2.0.0', or omit incremental=true "
+        "to create a rebuild-only FTS index.");
+  }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
-                        ignore, strip_accents, lower);
+                        ignore, strip_accents, lower, incremental);
 }
 
 } // namespace duckdb

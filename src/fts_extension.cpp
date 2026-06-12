@@ -68,6 +68,7 @@ static void LoadInternal(ExtensionLoader &loader) {
       LogicalType::BOOLEAN;
   create_fts_index_func.named_parameters["lower"] = LogicalType::BOOLEAN;
   create_fts_index_func.named_parameters["overwrite"] = LogicalType::BOOLEAN;
+  create_fts_index_func.named_parameters["incremental"] = LogicalType::BOOLEAN;
 
   auto drop_fts_index_func = PragmaFunction::PragmaCall(
       "drop_fts_index", FTSIndexing::DropFTSIndexQuery, {LogicalType::VARCHAR});

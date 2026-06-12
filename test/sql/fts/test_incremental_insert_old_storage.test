@@ -1,0 +1,46 @@
+# name: test/sql/fts/test_incremental_insert_old_storage.test
+# description: Test incremental FTS index creation on old persistent storage
+# group: [fts]
+
+require noforcestorage
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+statement ok
+ATTACH '__TEST_DIR__/fts_old_storage.db' AS old_fts (STORAGE_VERSION 'v1.5.0')
+
+statement ok
+CREATE TABLE old_fts.main.docs (id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO old_fts.main.docs VALUES ('doc1', 'quacking')
+
+statement error
+PRAGMA create_fts_index('old_fts.main.docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
+----
+incremental FTS indexes require trigger support
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'old_fts' AND schema_name = 'fts_main_docs'
+----
+0
+
+statement ok
+PRAGMA create_fts_index('old_fts.main.docs', 'id', 'body', stemmer='porter', stopwords='none')
+
+statement ok
+INSERT INTO old_fts.main.docs VALUES ('doc2', 'barking')
+
+query I
+SELECT count(*) FROM old_fts.fts_main_docs.docs
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE database_name = 'old_fts' AND trigger_name LIKE '__fts_%'
+----
+0
