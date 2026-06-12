@@ -1,0 +1,50 @@
+# name: test/sql/fts/test_incremental_insert_edge_cases.test
+# description: Temporary FTS incremental update edge cases
+# group: [fts]
+
+require fts
+
+require skip_reload
+
+require no_alternative_verify
+
+# Overwriting an incremental index with the default non-incremental index should
+# remove the old INSERT triggers.
+statement ok
+CREATE TABLE docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO docs VALUES ('doc1', 'quacking')
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_%'
+----
+5
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', overwrite=true)
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_%'
+----
+0
+
+statement ok
+INSERT INTO docs VALUES ('doc2', 'barking')
+
+query I
+SELECT count(*) FROM fts_main_docs.docs
+----
+1
+
+query I
+SELECT count(*) FROM (
+    SELECT *, fts_main_docs.match_bm25(id, 'barking') AS score
+    FROM docs
+) sq
+WHERE score IS NOT NULL
+----
+0

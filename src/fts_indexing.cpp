@@ -33,8 +33,8 @@ static string GetFTSSchemaName(const QualifiedName &qname) {
 static string GetFTSSchema(const QualifiedName &qname) {
   auto result = IsInvalidCatalog(qname.catalog)
                     ? string("")
-                    : qname.catalog.GetIdentifierName() + ".";
-  result += GetFTSSchemaName(qname);
+                    : SQLIdentifier::ToString(qname.catalog.GetIdentifierName()) + ".";
+  result += SQLIdentifier::ToString(GetFTSSchemaName(qname));
   return result;
 }
 
@@ -117,12 +117,13 @@ static string TokenizeMacroScript(const string &ignore, bool strip_accents,
   return "CREATE MACRO %fts_schema%.tokenize(s) AS " + expr + ";";
 }
 
-static string IndexTablesScript(const vector<string> &input_values) {
+static string IndexTablesScript(const string &input_id,
+                                const vector<string> &input_values) {
   // clang-format off
 	string result = R"(
         CREATE TABLE %fts_schema%.docs AS (
             SELECT rowid AS docid,
-                   "%input_id%" AS name
+                   %input_id% AS name
             FROM %input_table%
         );
 
@@ -192,9 +193,9 @@ static string IndexTablesScript(const vector<string> &input_values) {
 
 	// Each field gets its own tokenize sub-query; they are unioned to retain the source field.
 	string tokenize_field_query = R"(
-        SELECT unnest(%fts_schema%.tokenize(fts_ii."%input_value%")) AS w,
+        SELECT unnest(%fts_schema%.tokenize(fts_ii.%input_value%)) AS w,
                rowid AS docid,
-               (SELECT fieldid FROM %fts_schema%.fields WHERE field = '%input_value%') AS fieldid
+               (SELECT fieldid FROM %fts_schema%.fields WHERE field = %input_value_string%) AS fieldid
         FROM %input_table% AS fts_ii
     )";
   // clang-format on
@@ -202,16 +203,22 @@ static string IndexTablesScript(const vector<string> &input_values) {
   vector<string> field_values;
   vector<string> tokenize_fields;
   for (idx_t i = 0; i < input_values.size(); i++) {
-    field_values.push_back(
-        StringUtil::Format("(%i, '%s')", i, input_values[i]));
-    tokenize_fields.push_back(StringUtil::Replace(
-        tokenize_field_query, "%input_value%", input_values[i]));
+    field_values.push_back(StringUtil::Format(
+        "(%i, %s)", i, SQLString::ToString(input_values[i])));
+    auto query =
+        StringUtil::Replace(tokenize_field_query, "%input_value%",
+                            SQLIdentifier::ToString(input_values[i]));
+    query = StringUtil::Replace(query, "%input_value_string%",
+                                SQLString::ToString(input_values[i]));
+    tokenize_fields.push_back(query);
   }
   result = StringUtil::Replace(result, "%field_values%",
                                StringUtil::Join(field_values, ", "));
   result =
       StringUtil::Replace(result, "%union_fields_query%",
                           StringUtil::Join(tokenize_fields, " UNION ALL "));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
   return result;
 }
 
@@ -478,27 +485,23 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                              const string &ignore, bool strip_accents,
                              bool lower, bool incremental) {
   string result;
-  if (incremental) {
+  if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
     result += DropFTSTriggersScript(qname);
   }
   result += SchemaSetupScript();
   result += StopwordsScript(stopwords);
   result += TokenizeMacroScript(ignore, strip_accents, lower);
-  result += IndexTablesScript(input_values);
+  result += IndexTablesScript(input_id, input_values);
   result += MatchMacroScript();
   if (incremental) {
     result += InsertTriggerScript(qname, input_id, input_values);
   }
 
   string fts_schema = GetFTSSchema(qname);
-  string input_table = qname.catalog == INVALID_CATALOG
-                           ? ""
-                           : StringUtil::Format("%s.", qname.catalog);
-  input_table += StringUtil::Format("%s.%s", qname.schema, qname.name);
+  string input_table = GetQualifiedTableName(qname);
 
   result = StringUtil::Replace(result, "%fts_schema%", fts_schema);
   result = StringUtil::Replace(result, "%input_table%", input_table);
-  result = StringUtil::Replace(result, "%input_id%", input_id);
   result = StringUtil::Replace(result, "%stemmer%", stemmer);
   return result;
 }

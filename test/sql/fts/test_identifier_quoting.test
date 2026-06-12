@@ -1,0 +1,54 @@
+# name: test/sql/fts/test_identifier_quoting.test
+# description: Test FTS indexing with quoted table and column identifiers
+# group: [fts]
+
+require fts
+
+require skip_reload
+
+require no_alternative_verify
+
+# Quoted table names should be valid FTS input table names.
+statement ok
+CREATE TABLE "my docs"(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO "my docs" VALUES ('doc1', 'quacking')
+
+statement ok
+PRAGMA create_fts_index('"my docs"', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
+
+query II
+SELECT name, len FROM "fts_main_my docs".docs
+----
+doc1	1
+
+# Indexed column names containing quotes should be escaped when building the
+# initial index SQL.
+statement ok
+CREATE TABLE quote_col(id VARCHAR, "bo""dy" VARCHAR)
+
+statement ok
+INSERT INTO quote_col VALUES ('doc1', 'quacking')
+
+statement ok
+PRAGMA create_fts_index('quote_col', 'id', 'bo"dy', stemmer='porter', stopwords='none', incremental=true)
+
+query II
+SELECT fieldid, field FROM fts_main_quote_col.fields
+----
+0	bo"dy
+
+statement ok
+CREATE TABLE single_quote_col(id VARCHAR, "bo'dy" VARCHAR)
+
+statement ok
+INSERT INTO single_quote_col VALUES ('doc1', 'quacking')
+
+statement ok
+PRAGMA create_fts_index('single_quote_col', 'id', 'bo''dy', stemmer='porter', stopwords='none', incremental=true)
+
+query II
+SELECT fieldid, field FROM fts_main_single_quote_col.fields
+----
+0	bo'dy
