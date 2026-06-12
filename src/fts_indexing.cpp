@@ -31,9 +31,10 @@ static string GetFTSSchemaName(const QualifiedName &qname) {
 }
 
 static string GetFTSSchema(const QualifiedName &qname) {
-  auto result = IsInvalidCatalog(qname.catalog)
-                    ? string("")
-                    : SQLIdentifier::ToString(qname.catalog.GetIdentifierName()) + ".";
+  auto result =
+      IsInvalidCatalog(qname.catalog)
+          ? string("")
+          : SQLIdentifier::ToString(qname.catalog.GetIdentifierName()) + ".";
   result += SQLIdentifier::ToString(GetFTSSchemaName(qname));
   return result;
 }
@@ -205,9 +206,8 @@ static string IndexTablesScript(const string &input_id,
   for (idx_t i = 0; i < input_values.size(); i++) {
     field_values.push_back(StringUtil::Format(
         "(%i, %s)", i, SQLString::ToString(input_values[i])));
-    auto query =
-        StringUtil::Replace(tokenize_field_query, "%input_value%",
-                            SQLIdentifier::ToString(input_values[i]));
+    auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
+                                     SQLIdentifier::ToString(input_values[i]));
     query = StringUtil::Replace(query, "%input_value_string%",
                                 SQLString::ToString(input_values[i]));
     tokenize_fields.push_back(query);
