@@ -11,7 +11,7 @@ require no_alternative_verify
 # Overwriting an incremental index with the default non-incremental index should
 # remove the old INSERT triggers.
 statement ok
-CREATE TABLE docs(id VARCHAR, body VARCHAR)
+CREATE TABLE docs(id VARCHAR NOT NULL, body VARCHAR)
 
 statement ok
 INSERT INTO docs VALUES ('doc1', 'quacking')
@@ -22,7 +22,7 @@ PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none'
 query I
 SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_%'
 ----
-5
+10
 
 statement ok
 PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', overwrite=true)
@@ -48,3 +48,42 @@ SELECT count(*) FROM (
 WHERE score IS NOT NULL
 ----
 0
+
+statement ok
+CREATE TABLE primary_key_docs(id VARCHAR PRIMARY KEY, body VARCHAR)
+
+statement ok
+INSERT INTO primary_key_docs VALUES ('doc1', 'quacking')
+
+statement ok
+PRAGMA create_fts_index('primary_key_docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
+
+query II
+SELECT name, len FROM fts_main_primary_key_docs.docs
+----
+doc1	1
+
+# Incremental indexes require unique document ids so DELETE triggers do not
+# remove multiple indexed documents for a single deleted source row.
+statement ok
+CREATE TABLE duplicate_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO duplicate_docs VALUES ('dup', 'quacking'), ('dup', 'barking')
+
+statement error
+PRAGMA create_fts_index('duplicate_docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
+----
+
+# Incremental indexes require the document id column to be declared NOT NULL so
+# DELETE triggers can always match indexed documents by id.
+statement ok
+CREATE TABLE nullable_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO nullable_docs VALUES (NULL, 'quacking')
+
+statement error
+PRAGMA create_fts_index('nullable_docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
+----
+incremental FTS indexes require the document id column to be NOT NULL

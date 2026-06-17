@@ -8,6 +8,8 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/storage/storage_info.hpp"
 #include "duckdb/storage/storage_manager.hpp"
@@ -49,10 +51,23 @@ static string GetQualifiedTableName(const QualifiedName &qname) {
   return StringUtil::Join(parts, ".");
 }
 
-static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
+static vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
   return {prefix + "00_docs", prefix + "10_dict_insert", prefix + "20_terms",
           prefix + "30_dict_df", prefix + "40_stats"};
+}
+
+static vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
+  auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
+  return {prefix + "00_terms", prefix + "10_docs", prefix + "20_dict_df",
+          prefix + "30_dict_prune", prefix + "40_stats"};
+}
+
+static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
+  auto result = GetFTSInsertTriggerNames(qname);
+  auto delete_triggers = GetFTSDeleteTriggerNames(qname);
+  result.insert(result.end(), delete_triggers.begin(), delete_triggers.end());
+  return result;
 }
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
@@ -71,6 +86,31 @@ static bool SupportsFTSTriggers(ClientContext &context,
   auto &storage_manager = attached.GetStorageManager();
   return storage_manager.InMemory() ||
          storage_manager.GetStorageVersion() >= StorageVersion::V2_0_0;
+}
+
+static bool ColumnHasNotNullConstraint(const TableCatalogEntry &table,
+                                       const string &column_name) {
+  auto column_identifier = Identifier(column_name);
+  auto column_index = table.GetColumnIndex(column_identifier);
+  for (auto &constraint : table.GetConstraints()) {
+    if (constraint->type == ConstraintType::NOT_NULL) {
+      auto &not_null = constraint->Cast<NotNullConstraint>();
+      if (not_null.index == column_index) {
+        return true;
+      }
+    } else if (constraint->type == ConstraintType::UNIQUE) {
+      auto &unique = constraint->Cast<UniqueConstraint>();
+      if (!unique.IsPrimaryKey()) {
+        continue;
+      }
+      for (auto &pk_index : unique.GetLogicalIndexes(table.GetColumns())) {
+        if (pk_index == column_index) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +343,14 @@ static string DropFTSTriggersScript(const QualifiedName &qname) {
   return StringUtil::Join(statements, "\n");
 }
 
+static string IncrementalIndexSetupScript(const QualifiedName &qname) {
+  auto index_name =
+      StringUtil::Format("__fts_%s_docs_name_idx", GetFTSSchemaName(qname));
+  return StringUtil::Format(
+      "CREATE UNIQUE INDEX %s ON %%fts_schema%%.docs(name);",
+      SQLIdentifier::ToString(index_name));
+}
+
 static string InsertTriggerScript(const QualifiedName &qname,
                                   const string &input_id,
                                   const vector<string> &input_values) {
@@ -474,6 +522,69 @@ static string InsertTriggerScript(const QualifiedName &qname,
   return result;
 }
 
+static string DeleteTriggerScript(const QualifiedName &qname,
+                                  const string &input_id) {
+  // clang-format off
+	string result = R"(
+        CREATE TRIGGER %trigger_00_terms% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.terms
+            WHERE docid IN (
+                SELECT d.docid
+                FROM %fts_schema%.docs AS d
+                JOIN fts_old_rows AS old_rows ON d.name = old_rows.%input_id%
+            );
+
+        CREATE TRIGGER %trigger_10_docs% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.docs
+            WHERE name IN (SELECT %input_id% FROM fts_old_rows);
+
+        CREATE TRIGGER %trigger_20_dict_df% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.dict AS d
+            SET df = (
+                SELECT count(DISTINCT docid)
+                FROM %fts_schema%.terms AS t
+                WHERE d.termid = t.termid
+            );
+
+        CREATE TRIGGER %trigger_30_dict_prune% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.dict
+            WHERE df = 0;
+
+        CREATE TRIGGER %trigger_40_stats% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.stats
+            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
+                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
+    )";
+  // clang-format on
+
+  auto trigger_names = GetFTSDeleteTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_00_terms%",
+                               SQLIdentifier::ToString(trigger_names[0]));
+  result = StringUtil::Replace(result, "%trigger_10_docs%",
+                               SQLIdentifier::ToString(trigger_names[1]));
+  result = StringUtil::Replace(result, "%trigger_20_dict_df%",
+                               SQLIdentifier::ToString(trigger_names[2]));
+  result = StringUtil::Replace(result, "%trigger_30_dict_prune%",
+                               SQLIdentifier::ToString(trigger_names[3]));
+  result = StringUtil::Replace(result, "%trigger_40_stats%",
+                               SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Coordinator: assembles all parts and substitutes cross-cutting placeholders
 // ---------------------------------------------------------------------------
@@ -494,7 +605,9 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   result += IndexTablesScript(input_id, input_values);
   result += MatchMacroScript();
   if (incremental) {
+    result += IncrementalIndexSetupScript(qname);
     result += InsertTriggerScript(qname, input_id, input_values);
+    result += DeleteTriggerScript(qname, input_id);
   }
 
   string fts_schema = GetFTSSchema(qname);
@@ -587,6 +700,11 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   const string doc_id = StringValue::Get(parameters.values[1]);
   auto &table = Catalog::GetEntry<TableCatalogEntry>(context, qname.catalog,
                                                      qname.schema, qname.name);
+  if (!table.ColumnExists(Identifier(doc_id))) {
+    throw CatalogException("Table '%s.%s' does not have a column named '%s'!",
+                           qname.schema.GetIdentifierName(),
+                           qname.name.GetIdentifierName(), doc_id);
+  }
   vector<string> doc_values;
   for (idx_t i = 2; i < parameters.values.size(); i++) {
     const string col_name = StringValue::Get(parameters.values[i]);
@@ -616,6 +734,10 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
         "databases must use storage version v2.0.0 or higher; reattach/create "
         "the database with STORAGE_VERSION 'v2.0.0', or omit incremental=true "
         "to create a rebuild-only FTS index.");
+  }
+  if (incremental && !ColumnHasNotNullConstraint(table, doc_id)) {
+    throw InvalidInputException("incremental FTS indexes require the document "
+                                "id column to be NOT NULL");
   }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
