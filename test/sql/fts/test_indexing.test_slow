@@ -55,6 +55,13 @@ PRAGMA create_fts_index('documents', 'id', 'body', stopwords='nonexistant_stopwo
 statement ok
 PRAGMA create_fts_index('documents', 'id', 'body', stopwords='english')
 
+query I
+SELECT token FROM unnest(fts_main_documents.tokenize('One two+three 999')) AS toks(token) WHERE token <> ''
+----
+one
+two
+three
+
 query III
 SELECT termid, docid, fieldid FROM fts_main_documents.terms
 ----
@@ -257,3 +264,20 @@ EXECUTE fts_query('quacked mark laurens')
 doc1	 QUÁCKING+QUÁCKING+QUÁCKING	Hannes
 doc2	 BÁRKING+BÁRKING+BÁRKING+BÁRKING	Mark
 doc3	 MÉOWING+MÉOWING+MÉOWING+MÉOWING+MÉOWING+999	Laurens
+
+# document frequency remains document-based when terms repeat within documents
+statement ok
+CREATE TABLE df_documents(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO df_documents VALUES ('doc1', 'repeat repeat solo'), ('doc2', 'repeat other'), ('doc3', 'repeat repeat other')
+
+statement ok
+PRAGMA create_fts_index('df_documents', 'id', 'body', stemmer='none', stopwords='none')
+
+query II
+SELECT term, df FROM fts_main_df_documents.dict WHERE term IN ('other', 'repeat', 'solo') ORDER BY term
+----
+other	2
+repeat	3
+solo	1
