@@ -72,7 +72,8 @@ static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
 }
 
 static string GetFTSBuildTermsTable(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_build_terms_" + GetFTSSchemaName(qname));
+  return SQLIdentifier::ToString("__fts_build_terms_" +
+                                 GetFTSSchemaName(qname));
 }
 
 static string GetFTSBuildDictTable(const QualifiedName &qname) {
@@ -171,7 +172,8 @@ static string IndexTablesScript(const string &input_id,
                                 const vector<string> &input_values,
                                 const string &stemmer, const string &stopwords,
                                 const string &build_terms_table,
-                                const string &build_dict_table) {
+                                const string &build_dict_table,
+                                bool cluster_terms) {
   // clang-format off
 	string result = R"(
         CREATE TABLE %fts_schema%.fields (fieldid BIGINT, field VARCHAR);
@@ -235,7 +237,8 @@ static string IndexTablesScript(const string &input_id,
                build_terms.fieldid
         FROM temp.%build_terms_table% AS build_terms
         JOIN temp.%build_dict_table% AS build_dict
-          ON build_dict.term = build_terms.term;
+          ON build_dict.term = build_terms.term
+        %terms_order_by%;
 
         CREATE TABLE %fts_schema%.dict AS
         WITH document_frequencies AS (
@@ -271,8 +274,7 @@ static string IndexTablesScript(const string &input_id,
     )";
   // clang-format on
 
-  string term_expression =
-      stemmer == "none" ? "t.w" : "stem(t.w, '%stemmer%')";
+  string term_expression = stemmer == "none" ? "t.w" : "stem(t.w, '%stemmer%')";
   string stopwords_filter =
       stopwords == "none"
           ? string("")
@@ -289,8 +291,14 @@ static string IndexTablesScript(const string &input_id,
         StringUtil::Replace(query, "%field_id%", StringUtil::Format("%i", i));
     tokenize_fields.push_back(query);
   }
-  result = StringUtil::Replace(result, "%build_terms_table%", build_terms_table);
+  result =
+      StringUtil::Replace(result, "%build_terms_table%", build_terms_table);
   result = StringUtil::Replace(result, "%build_dict_table%", build_dict_table);
+  result = StringUtil::Replace(
+      result, "%terms_order_by%",
+      cluster_terms ? "ORDER BY build_dict.termid, build_terms.fieldid, "
+                      "build_terms.docid"
+                    : "");
   result = StringUtil::Replace(result, "%term_expression%", term_expression);
   result = StringUtil::Replace(result, "%stopwords_filter%", stopwords_filter);
   result = StringUtil::Replace(result, "%field_values%",
@@ -635,7 +643,7 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                              const vector<string> &input_values,
                              const string &stemmer, const string &stopwords,
                              const string &ignore, bool strip_accents,
-                             bool lower, bool incremental) {
+                             bool lower, bool incremental, bool cluster_terms) {
   string result;
   if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
     result += DropFTSTriggersScript(qname);
@@ -645,7 +653,7 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   result += TokenizeMacroScript(ignore, strip_accents, lower);
   result += IndexTablesScript(input_id, input_values, stemmer, stopwords,
                               GetFTSBuildTermsTable(qname),
-                              GetFTSBuildDictTable(qname));
+                              GetFTSBuildDictTable(qname), cluster_terms);
   result += MatchMacroScript();
   if (incremental) {
     result += IncrementalIndexSetupScript(qname);
@@ -719,6 +727,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   const bool lower = get_bool("lower", true);
   const bool overwrite = get_bool("overwrite", false);
   const bool incremental = get_bool("incremental", false);
+  const bool cluster_terms = get_bool("cluster_terms", false);
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
@@ -784,7 +793,8 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
-                        ignore, strip_accents, lower, incremental);
+                        ignore, strip_accents, lower, incremental,
+                        cluster_terms);
 }
 
 } // namespace duckdb
