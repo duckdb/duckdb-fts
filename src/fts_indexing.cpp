@@ -19,35 +19,36 @@ namespace duckdb {
 static QualifiedName GetQualifiedName(ClientContext &context,
                                       const string &qname_str) {
   auto qname = QualifiedName::Parse(qname_str);
-  if (qname.schema == INVALID_SCHEMA) {
-    qname.schema =
+  if (qname.Schema() == INVALID_SCHEMA) {
+    qname.SchemaMutable() =
         ClientData::Get(context).catalog_search_path->GetDefaultSchema(
-            qname.catalog);
+            qname.Catalog());
   }
   return qname;
 }
 
 static string GetFTSSchemaName(const QualifiedName &qname) {
-  return StringUtil::Format("fts_%s_%s", qname.schema.GetIdentifierName(),
-                            qname.name.GetIdentifierName());
+  return StringUtil::Format("fts_%s_%s", qname.Schema().GetIdentifierName(),
+                            qname.Name().GetIdentifierName());
 }
 
 static string GetFTSSchema(const QualifiedName &qname) {
   auto result =
-      IsInvalidCatalog(qname.catalog)
+      IsInvalidCatalog(qname.Catalog())
           ? string("")
-          : SQLIdentifier::ToString(qname.catalog.GetIdentifierName()) + ".";
+          : SQLIdentifier::ToString(qname.Catalog().GetIdentifierName()) + ".";
   result += SQLIdentifier::ToString(GetFTSSchemaName(qname));
   return result;
 }
 
 static string GetQualifiedTableName(const QualifiedName &qname) {
   vector<string> parts;
-  if (!IsInvalidCatalog(qname.catalog)) {
-    parts.push_back(SQLIdentifier::ToString(qname.catalog.GetIdentifierName()));
+  if (!IsInvalidCatalog(qname.Catalog())) {
+    parts.push_back(
+        SQLIdentifier::ToString(qname.Catalog().GetIdentifierName()));
   }
-  parts.push_back(SQLIdentifier::ToString(qname.schema.GetIdentifierName()));
-  parts.push_back(SQLIdentifier::ToString(qname.name.GetIdentifierName()));
+  parts.push_back(SQLIdentifier::ToString(qname.Schema().GetIdentifierName()));
+  parts.push_back(SQLIdentifier::ToString(qname.Name().GetIdentifierName()));
   return StringUtil::Join(parts, ".");
 }
 
@@ -72,13 +73,13 @@ static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
   return Catalog::GetEntry<TableCatalogEntry>(
-             context, qname.catalog, qname.schema, qname.name,
+             context, qname.Catalog(), qname.Schema(), qname.Name(),
              OnEntryNotFound::RETURN_NULL) != nullptr;
 }
 
 static bool SupportsFTSTriggers(ClientContext &context,
                                 const QualifiedName &qname) {
-  auto &catalog = Catalog::GetCatalog(context, qname.catalog);
+  auto &catalog = Catalog::GetCatalog(context, qname.Catalog());
   auto &attached = catalog.GetAttached();
   if (!attached.HasStorageManager()) {
     return true;
@@ -629,13 +630,13 @@ string FTSIndexing::DropFTSIndexQuery(ClientContext &context,
       GetQualifiedName(context, StringValue::Get(parameters.values[0]));
   string fts_schema = GetFTSSchema(qname);
 
-  if (!Catalog::GetSchema(context, qname.catalog,
+  if (!Catalog::GetSchema(context, qname.Catalog(),
                           Identifier(GetFTSSchemaName(qname)),
                           OnEntryNotFound::RETURN_NULL)) {
     throw CatalogException("a FTS index does not exist on table '%s.%s'. "
                            "Create one with 'PRAGMA create_fts_index()'.",
-                           qname.schema.GetIdentifierName(),
-                           qname.name.GetIdentifierName());
+                           qname.Schema().GetIdentifierName(),
+                           qname.Name().GetIdentifierName());
   }
 
   string result;
@@ -651,8 +652,8 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
                                         const FunctionParameters &parameters) {
   auto qname =
       GetQualifiedName(context, StringValue::Get(parameters.values[0]));
-  Catalog::GetEntry<TableCatalogEntry>(context, qname.catalog, qname.schema,
-                                       qname.name);
+  Catalog::GetEntry<TableCatalogEntry>(context, qname.Catalog(), qname.Schema(),
+                                       qname.Name());
 
   // Named parameters
   auto get_string = [&](const string &name, const string &def) {
@@ -679,12 +680,12 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
-    Catalog::GetEntry<TableCatalogEntry>(context, sw_qname.catalog,
-                                         sw_qname.schema, sw_qname.name);
+    Catalog::GetEntry<TableCatalogEntry>(context, sw_qname.Catalog(),
+                                         sw_qname.Schema(), sw_qname.Name());
   }
 
   const string fts_schema = GetFTSSchema(qname);
-  if (Catalog::GetSchema(context, qname.catalog,
+  if (Catalog::GetSchema(context, qname.Catalog(),
                          Identifier(GetFTSSchemaName(qname)),
                          OnEntryNotFound::RETURN_NULL) &&
       !overwrite) {
@@ -692,18 +693,18 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
                            "Supply 'overwrite=1' to overwrite, or "
                            "drop the existing index with 'PRAGMA "
                            "drop_fts_index()' before creating a new one.",
-                           qname.schema.GetIdentifierName(),
-                           qname.name.GetIdentifierName());
+                           qname.Schema().GetIdentifierName(),
+                           qname.Name().GetIdentifierName());
   }
 
   // Positional parameters: table, id column, value column(s)
   const string doc_id = StringValue::Get(parameters.values[1]);
-  auto &table = Catalog::GetEntry<TableCatalogEntry>(context, qname.catalog,
-                                                     qname.schema, qname.name);
+  auto &table = Catalog::GetEntry<TableCatalogEntry>(
+      context, qname.Catalog(), qname.Schema(), qname.Name());
   if (!table.ColumnExists(Identifier(doc_id))) {
     throw CatalogException("Table '%s.%s' does not have a column named '%s'!",
-                           qname.schema.GetIdentifierName(),
-                           qname.name.GetIdentifierName(), doc_id);
+                           qname.Schema().GetIdentifierName(),
+                           qname.Name().GetIdentifierName(), doc_id);
   }
   vector<string> doc_values;
   for (idx_t i = 2; i < parameters.values.size(); i++) {
@@ -719,8 +720,8 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
     }
     if (!table.ColumnExists(Identifier(col_name))) {
       throw CatalogException("Table '%s.%s' does not have a column named '%s'!",
-                             qname.schema.GetIdentifierName(),
-                             qname.name.GetIdentifierName(), col_name);
+                             qname.Schema().GetIdentifierName(),
+                             qname.Name().GetIdentifierName(), col_name);
     }
     doc_values.push_back(col_name);
   }
