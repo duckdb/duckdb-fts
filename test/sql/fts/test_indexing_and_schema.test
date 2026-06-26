@@ -37,3 +37,36 @@ SET SCHEMA='test'
 
 statement ok
 PRAGMA drop_fts_index('documents')
+
+statement ok
+CREATE TABLE clustered_documents(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO clustered_documents VALUES ('doc1', 'alpha beta alpha'), ('doc2', 'beta gamma')
+
+statement ok
+PRAGMA create_fts_index('clustered_documents', 'id', 'body', stemmer='none', stopwords='none', cluster_terms=true)
+
+query I
+SELECT count(*)
+FROM fts_test_clustered_documents.terms
+----
+5
+
+query I
+SELECT count(*)
+FROM (
+    SELECT termid, lag(termid) OVER () AS previous_termid
+    FROM fts_test_clustered_documents.terms
+) ordered_terms
+WHERE previous_termid IS NOT NULL
+  AND termid < previous_termid
+----
+0
+
+query I
+SELECT count(*)
+FROM clustered_documents
+WHERE fts_test_clustered_documents.match_bm25(id, 'alpha') IS NOT NULL
+----
+1

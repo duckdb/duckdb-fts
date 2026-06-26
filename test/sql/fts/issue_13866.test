@@ -11,3 +11,9 @@ CREATE TABLE my_table AS SELECT 1 AS CustomerId, 'hans' as CustomerName
 
 statement ok
 PRAGMA create_fts_index(my_table, 'CustomerId', 'CustomerName', ignore='(\\.|[^a-z0-9''])+')
+
+query I
+SELECT token FROM unnest(fts_main_my_table.tokenize('hans.o''brien')) AS toks(token) WHERE token <> ''
+----
+hans
+o'brien
