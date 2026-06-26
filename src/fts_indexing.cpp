@@ -801,6 +801,10 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
     throw InvalidInputException("incremental FTS indexes require the document "
                                 "id column to be NOT NULL");
   }
+  if (incremental && cluster_terms) {
+    throw InvalidInputException("cluster_terms cannot be combined with "
+                                "incremental FTS indexes");
+  }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
                         ignore, strip_accents, lower, incremental,
