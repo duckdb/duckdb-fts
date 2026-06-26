@@ -19,35 +19,36 @@ namespace duckdb {
 static QualifiedName GetQualifiedName(ClientContext &context,
                                       const string &qname_str) {
   auto qname = QualifiedName::Parse(qname_str);
-  if (qname.schema == INVALID_SCHEMA) {
-    qname.schema =
+  if (qname.Schema() == INVALID_SCHEMA) {
+    qname.SchemaMutable() =
         ClientData::Get(context).catalog_search_path->GetDefaultSchema(
-            qname.catalog);
+            qname.Catalog());
   }
   return qname;
 }
 
 static string GetFTSSchemaName(const QualifiedName &qname) {
-  return StringUtil::Format("fts_%s_%s", qname.schema.GetIdentifierName(),
-                            qname.name.GetIdentifierName());
+  return StringUtil::Format("fts_%s_%s", qname.Schema().GetIdentifierName(),
+                            qname.Name().GetIdentifierName());
 }
 
 static string GetFTSSchema(const QualifiedName &qname) {
   auto result =
-      IsInvalidCatalog(qname.catalog)
+      IsInvalidCatalog(qname.Catalog())
           ? string("")
-          : SQLIdentifier::ToString(qname.catalog.GetIdentifierName()) + ".";
+          : SQLIdentifier::ToString(qname.Catalog().GetIdentifierName()) + ".";
   result += SQLIdentifier::ToString(GetFTSSchemaName(qname));
   return result;
 }
 
 static string GetQualifiedTableName(const QualifiedName &qname) {
   vector<string> parts;
-  if (!IsInvalidCatalog(qname.catalog)) {
-    parts.push_back(SQLIdentifier::ToString(qname.catalog.GetIdentifierName()));
+  if (!IsInvalidCatalog(qname.Catalog())) {
+    parts.push_back(
+        SQLIdentifier::ToString(qname.Catalog().GetIdentifierName()));
   }
-  parts.push_back(SQLIdentifier::ToString(qname.schema.GetIdentifierName()));
-  parts.push_back(SQLIdentifier::ToString(qname.name.GetIdentifierName()));
+  parts.push_back(SQLIdentifier::ToString(qname.Schema().GetIdentifierName()));
+  parts.push_back(SQLIdentifier::ToString(qname.Name().GetIdentifierName()));
   return StringUtil::Join(parts, ".");
 }
 
@@ -70,15 +71,24 @@ static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
   return result;
 }
 
+static string GetFTSBuildTermsTable(const QualifiedName &qname) {
+  return SQLIdentifier::ToString("__fts_build_terms_" +
+                                 GetFTSSchemaName(qname));
+}
+
+static string GetFTSBuildDictTable(const QualifiedName &qname) {
+  return SQLIdentifier::ToString("__fts_build_dict_" + GetFTSSchemaName(qname));
+}
+
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
   return Catalog::GetEntry<TableCatalogEntry>(
-             context, qname.catalog, qname.schema, qname.name,
+             context, qname.Catalog(), qname.Schema(), qname.Name(),
              OnEntryNotFound::RETURN_NULL) != nullptr;
 }
 
 static bool SupportsFTSTriggers(ClientContext &context,
                                 const QualifiedName &qname) {
-  auto &catalog = Catalog::GetCatalog(context, qname.catalog);
+  auto &catalog = Catalog::GetCatalog(context, qname.Catalog());
   auto &attached = catalog.GetAttached();
   if (!attached.HasStorageManager()) {
     return true;
@@ -153,77 +163,100 @@ static string TokenizeMacroScript(const string &ignore, bool strip_accents,
   if (lower) {
     expr = "lower(" + expr + ")";
   }
-  expr = "regexp_replace(" + expr + ", $$" + ignore + "$$, ' ', 'g')";
-  expr = "string_split_regex(" + expr + ", '\\s+')";
+  auto delimiter = "(" + ignore + ")|\\s+";
+  expr = "string_split_regex(" + expr + ", $$" + delimiter + "$$)";
   return "CREATE MACRO %fts_schema%.tokenize(s) AS " + expr + ";";
 }
 
 static string IndexTablesScript(const string &input_id,
-                                const vector<string> &input_values) {
+                                const vector<string> &input_values,
+                                const string &stemmer, const string &stopwords,
+                                const string &build_terms_table,
+                                const string &build_dict_table,
+                                bool cluster_terms) {
   // clang-format off
 	string result = R"(
-        CREATE TABLE %fts_schema%.docs AS (
-            SELECT rowid AS docid,
-                   %input_id% AS name
-            FROM %input_table%
-        );
-
         CREATE TABLE %fts_schema%.fields (fieldid BIGINT, field VARCHAR);
         INSERT INTO %fts_schema%.fields VALUES %field_values%;
 
-        CREATE TABLE %fts_schema%.terms AS
+        DROP TABLE IF EXISTS temp.%build_terms_table%;
+        DROP TABLE IF EXISTS temp.%build_dict_table%;
+
+        CREATE TEMP TABLE %build_terms_table% AS
         WITH tokenized AS (
             %union_fields_query%
         ),
         stemmed_stopped AS (
-            SELECT stem(t.w, '%stemmer%') AS term,
+            SELECT %term_expression% AS term,
                    t.docid AS docid,
                    t.fieldid AS fieldid
             FROM tokenized AS t
             WHERE t.w NOT NULL
-              AND len(t.w) > 0
-              AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+              AND t.w <> ''
+              %stopwords_filter%
         )
         SELECT ss.term,
                ss.docid,
                ss.fieldid
         FROM stemmed_stopped AS ss;
 
-        ALTER TABLE %fts_schema%.docs ADD len BIGINT;
-        UPDATE %fts_schema%.docs d
-        SET len = (
-            SELECT count(term)
-            FROM %fts_schema%.terms AS t
-            WHERE t.docid = d.docid
-        );
+        CREATE TABLE %fts_schema%.docs AS
+        WITH lengths AS (
+            SELECT docid,
+                   count(*)::BIGINT AS len
+            FROM temp.%build_terms_table%
+            GROUP BY docid
+        )
+        SELECT fts_docs.rowid AS docid,
+               fts_docs.%input_id% AS name,
+               COALESCE(lengths.len, 0)::BIGINT AS len
+        FROM %input_table% AS fts_docs
+        LEFT JOIN lengths
+          ON lengths.docid = fts_docs.rowid
+        ORDER BY fts_docs.rowid;
+
+        CREATE TEMP TABLE %build_dict_table% AS
+        WITH grouped_terms AS (
+            SELECT term,
+                   min(docid) AS first_docid
+            FROM temp.%build_terms_table%
+            GROUP BY term
+        ),
+        numbered_terms AS (
+            SELECT row_number() OVER (ORDER BY first_docid, term) - 1 AS termid,
+                   term
+            FROM grouped_terms
+        )
+        SELECT termid,
+               term
+        FROM numbered_terms;
+
+        CREATE TABLE %fts_schema%.terms AS
+        SELECT build_dict.termid,
+               build_terms.docid,
+               build_terms.fieldid
+        FROM temp.%build_terms_table% AS build_terms
+        JOIN temp.%build_dict_table% AS build_dict
+          ON build_dict.term = build_terms.term
+        %terms_order_by%;
 
         CREATE TABLE %fts_schema%.dict AS
-        WITH distinct_terms AS (
-            SELECT DISTINCT term
+        WITH document_frequencies AS (
+            SELECT termid,
+                   count(DISTINCT docid)::BIGINT AS df
             FROM %fts_schema%.terms
-            ORDER BY docid, term
-        )
-        SELECT row_number() OVER () - 1 AS termid,
-               dt.term
-        FROM distinct_terms AS dt;
-
-        ALTER TABLE %fts_schema%.terms ADD termid BIGINT;
-        UPDATE %fts_schema%.terms t
-        SET termid = (
-            SELECT termid
-            FROM %fts_schema%.dict d
-            WHERE t.term = d.term
-        );
-        ALTER TABLE %fts_schema%.terms DROP term;
-
-        ALTER TABLE %fts_schema%.dict ADD df BIGINT;
-        UPDATE %fts_schema%.dict d
-        SET df = (
-            SELECT count(distinct docid)
-            FROM %fts_schema%.terms t
-            WHERE d.termid = t.termid
             GROUP BY termid
-        );
+        )
+        SELECT build_dict.termid,
+               build_dict.term,
+               document_frequencies.df
+        FROM temp.%build_dict_table% AS build_dict
+        JOIN document_frequencies
+          ON document_frequencies.termid = build_dict.termid
+        ORDER BY build_dict.termid;
+
+        DROP TABLE temp.%build_terms_table%;
+        DROP TABLE temp.%build_dict_table%;
 
         CREATE TABLE %fts_schema%.stats AS (
             SELECT COUNT(docs.docid) AS num_docs,
@@ -235,11 +268,17 @@ static string IndexTablesScript(const string &input_id,
 	// Each field gets its own tokenize sub-query; they are unioned to retain the source field.
 	string tokenize_field_query = R"(
         SELECT unnest(%fts_schema%.tokenize(fts_ii.%input_value%)) AS w,
-               rowid AS docid,
-               (SELECT fieldid FROM %fts_schema%.fields WHERE field = %input_value_string%) AS fieldid
+               fts_ii.rowid AS docid,
+               %field_id% AS fieldid
         FROM %input_table% AS fts_ii
     )";
   // clang-format on
+
+  string term_expression = stemmer == "none" ? "t.w" : "stem(t.w, '%stemmer%')";
+  string stopwords_filter =
+      stopwords == "none"
+          ? string("")
+          : "AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)";
 
   vector<string> field_values;
   vector<string> tokenize_fields;
@@ -248,10 +287,20 @@ static string IndexTablesScript(const string &input_id,
         "(%i, %s)", i, SQLString::ToString(input_values[i])));
     auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
                                      SQLIdentifier::ToString(input_values[i]));
-    query = StringUtil::Replace(query, "%input_value_string%",
-                                SQLString::ToString(input_values[i]));
+    query =
+        StringUtil::Replace(query, "%field_id%", StringUtil::Format("%i", i));
     tokenize_fields.push_back(query);
   }
+  result =
+      StringUtil::Replace(result, "%build_terms_table%", build_terms_table);
+  result = StringUtil::Replace(result, "%build_dict_table%", build_dict_table);
+  result = StringUtil::Replace(
+      result, "%terms_order_by%",
+      cluster_terms ? "ORDER BY build_dict.termid, build_terms.fieldid, "
+                      "build_terms.docid"
+                    : "");
+  result = StringUtil::Replace(result, "%term_expression%", term_expression);
+  result = StringUtil::Replace(result, "%stopwords_filter%", stopwords_filter);
   result = StringUtil::Replace(result, "%field_values%",
                                StringUtil::Join(field_values, ", "));
   result =
@@ -393,7 +442,7 @@ static string InsertTriggerScript(const QualifiedName &qname,
                    t.fieldid AS fieldid
             FROM tokenized AS t
             WHERE t.w NOT NULL
-              AND len(t.w) > 0
+              AND t.w <> ''
               AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
         )
     )";
@@ -413,7 +462,7 @@ static string InsertTriggerScript(const QualifiedName &qname,
                        t.fieldid AS fieldid
                 FROM tokenized AS t
                 WHERE t.w NOT NULL
-                  AND len(t.w) > 0
+                  AND t.w <> ''
                   AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
             ),
             lengths AS (
@@ -604,7 +653,7 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                              const vector<string> &input_values,
                              const string &stemmer, const string &stopwords,
                              const string &ignore, bool strip_accents,
-                             bool lower, bool incremental) {
+                             bool lower, bool incremental, bool cluster_terms) {
   string result;
   if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
     result += DropFTSTriggersScript(qname);
@@ -612,7 +661,9 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   result += SchemaSetupScript();
   result += StopwordsScript(stopwords);
   result += TokenizeMacroScript(ignore, strip_accents, lower);
-  result += IndexTablesScript(input_id, input_values);
+  result += IndexTablesScript(input_id, input_values, stemmer, stopwords,
+                              GetFTSBuildTermsTable(qname),
+                              GetFTSBuildDictTable(qname), cluster_terms);
   result += MatchMacroScript();
   if (incremental) {
     result += IncrementalIndexSetupScript(qname);
@@ -639,13 +690,13 @@ string FTSIndexing::DropFTSIndexQuery(ClientContext &context,
       GetQualifiedName(context, StringValue::Get(parameters.values[0]));
   string fts_schema = GetFTSSchema(qname);
 
-  if (!Catalog::GetSchema(context, qname.catalog,
+  if (!Catalog::GetSchema(context, qname.Catalog(),
                           Identifier(GetFTSSchemaName(qname)),
                           OnEntryNotFound::RETURN_NULL)) {
     throw CatalogException("a FTS index does not exist on table '%s.%s'. "
                            "Create one with 'PRAGMA create_fts_index()'.",
-                           qname.schema.GetIdentifierName(),
-                           qname.name.GetIdentifierName());
+                           qname.Schema().GetIdentifierName(),
+                           qname.Name().GetIdentifierName());
   }
 
   string result;
@@ -661,8 +712,8 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
                                         const FunctionParameters &parameters) {
   auto qname =
       GetQualifiedName(context, StringValue::Get(parameters.values[0]));
-  Catalog::GetEntry<TableCatalogEntry>(context, qname.catalog, qname.schema,
-                                       qname.name);
+  Catalog::GetEntry<TableCatalogEntry>(context, qname.Catalog(), qname.Schema(),
+                                       qname.Name());
 
   // Named parameters
   auto get_string = [&](const string &name, const string &def) {
@@ -686,15 +737,16 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   const bool lower = get_bool("lower", true);
   const bool overwrite = get_bool("overwrite", false);
   const bool incremental = get_bool("incremental", false);
+  const bool cluster_terms = get_bool("cluster_terms", false);
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
-    Catalog::GetEntry<TableCatalogEntry>(context, sw_qname.catalog,
-                                         sw_qname.schema, sw_qname.name);
+    Catalog::GetEntry<TableCatalogEntry>(context, sw_qname.Catalog(),
+                                         sw_qname.Schema(), sw_qname.Name());
   }
 
   const string fts_schema = GetFTSSchema(qname);
-  if (Catalog::GetSchema(context, qname.catalog,
+  if (Catalog::GetSchema(context, qname.Catalog(),
                          Identifier(GetFTSSchemaName(qname)),
                          OnEntryNotFound::RETURN_NULL) &&
       !overwrite) {
@@ -702,18 +754,18 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
                            "Supply 'overwrite=1' to overwrite, or "
                            "drop the existing index with 'PRAGMA "
                            "drop_fts_index()' before creating a new one.",
-                           qname.schema.GetIdentifierName(),
-                           qname.name.GetIdentifierName());
+                           qname.Schema().GetIdentifierName(),
+                           qname.Name().GetIdentifierName());
   }
 
   // Positional parameters: table, id column, value column(s)
   const string doc_id = StringValue::Get(parameters.values[1]);
-  auto &table = Catalog::GetEntry<TableCatalogEntry>(context, qname.catalog,
-                                                     qname.schema, qname.name);
+  auto &table = Catalog::GetEntry<TableCatalogEntry>(
+      context, qname.Catalog(), qname.Schema(), qname.Name());
   if (!table.ColumnExists(Identifier(doc_id))) {
     throw CatalogException("Table '%s.%s' does not have a column named '%s'!",
-                           qname.schema.GetIdentifierName(),
-                           qname.name.GetIdentifierName(), doc_id);
+                           qname.Schema().GetIdentifierName(),
+                           qname.Name().GetIdentifierName(), doc_id);
   }
   vector<string> doc_values;
   for (idx_t i = 2; i < parameters.values.size(); i++) {
@@ -729,8 +781,8 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
     }
     if (!table.ColumnExists(Identifier(col_name))) {
       throw CatalogException("Table '%s.%s' does not have a column named '%s'!",
-                             qname.schema.GetIdentifierName(),
-                             qname.name.GetIdentifierName(), col_name);
+                             qname.Schema().GetIdentifierName(),
+                             qname.Name().GetIdentifierName(), col_name);
     }
     doc_values.push_back(col_name);
   }
@@ -751,7 +803,8 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
-                        ignore, strip_accents, lower, incremental);
+                        ignore, strip_accents, lower, incremental,
+                        cluster_terms);
 }
 
 } // namespace duckdb
