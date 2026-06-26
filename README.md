@@ -22,7 +22,7 @@ The extension adds two `PRAGMA` statements to DuckDB: one to create, and one to 
 create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
                  stopwords = 'english', ignore = '(\\.|[^a-z])+',
                  strip_accents = 1, lower = 1, overwrite = 0,
-                 cluster_terms = 0)
+                 incremental = 0, cluster_terms = 0, layered_search = 0)
 ```
 
 `PRAGMA` that creates a FTS index for the specified table.
@@ -40,7 +40,9 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` |
 | `lower` | `BOOLEAN` | Whether to convert all text to lowercase. Defaults to `1` |
 | `overwrite` | `BOOLEAN` | Whether to overwrite an existing index on a table. Defaults to `0` |
+| `incremental` | `BOOLEAN` | Whether to keep the index in sync for subsequent `INSERT` and `DELETE` statements using triggers. Defaults to `0` |
 | `cluster_terms` | `BOOLEAN` | Whether to physically order the generated `terms` table by `termid`, `fieldid`, and `docid`. This can improve query-time pruning for direct reads from the FTS tables. Defaults to `0` |
+| `layered_search` | `BOOLEAN` | Whether to build a dictionary trigram sidecar and layered BM25 search macros for exact, prefix, substring, and fuzzy query expansion. This implies `cluster_terms`. Defaults to `0` |
 
 <!-- markdownlint-enable MD056 -->
 
@@ -75,6 +77,34 @@ When an index is built, this retrieval macro is created that can be used to sear
 | `k` | `DOUBLE` | Parameter _k<sub>1</sub>_ in the Okapi BM25 retrieval model. Defaults to `1.2` |
 | `b` | `DOUBLE` | Parameter _b_ in the Okapi BM25 retrieval model. Defaults to `0.75` |
 | `conjunctive` | `BOOLEAN` | Whether to make the query conjunctive i.e., all terms in the query string must be present in order for a document to be retrieved |
+
+### Layered BM25 Search
+
+```python
+search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2,
+                    b := 0.75, term_limit := 32, max_df_ratio := 0.15,
+                    max_df := 50000, enable_prefix := true,
+                    enable_substring := true, enable_fuzzy := true,
+                    enable_short_fuzzy := true, expand_exact_terms := false)
+
+match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2,
+                   b := 0.75, term_limit := 32, max_df_ratio := 0.15,
+                   max_df := 50000, enable_prefix := true,
+                   enable_substring := true, enable_fuzzy := true,
+                   enable_short_fuzzy := true, expand_exact_terms := false)
+```
+
+When `layered_search` is enabled, the extension builds two additional
+dictionary sidecar tables, `term_stats` and `term_grams`, plus a
+length-clustered copy of the dictionary metadata. These tables grow with the
+term dictionary rather than with the document corpus and are used to expand
+query terms before scoring over the standard FTS `terms` table.
+
+`search_layered_bm25` returns `docname`, `score`, and `rank`.
+`match_layered_bm25` is the scalar form for use against an input table row.
+Exact terms are always included. Prefix, substring, and fuzzy alternatives can
+be toggled with the corresponding parameters. Numeric query terms are searched
+exactly but are excluded from trigram/fuzzy expansion.
 
 ### `stem` Function
 
@@ -160,8 +190,10 @@ ORDER BY score DESC;
 |---------------------|------------------------------------------------------------|------:|
 | doc2                | The cat is a domestic species of small carnivorous mammal. | 0.0   |
 
-> Warning The FTS index will not update automatically when input table changes.
-> A workaround of this limitation can be recreating the index to refresh.
+> Warning Without `incremental = true`, the FTS index will not update
+> automatically when the input table changes. With `incremental = true`, the
+> index and layered sidecar are maintained for `INSERT` and `DELETE`
+> statements on tables that support triggers.
 
 ## Stemmers
 
