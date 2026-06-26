@@ -32,6 +32,14 @@ SELECT CASE WHEN count(*) > 0 THEN 1 ELSE 0 END FROM fts_main_documents.term_gra
 
 query I
 SELECT count(*)
+FROM fts_main_documents.term_grams AS tg
+JOIN fts_main_documents.term_stats AS ts USING (termid)
+WHERE ts.term = '999'
+----
+0
+
+query I
+SELECT count(*)
 FROM (
     SELECT termid, lag(termid) OVER () AS previous_termid
     FROM fts_main_documents.terms
@@ -74,6 +82,9 @@ doc3
 statement ok
 INSERT INTO documents VALUES ('doc4', 'chirping chirping', 'Mark')
 
+statement ok
+INSERT INTO documents VALUES ('doc5', 'singing', 'Marker')
+
 query II
 SELECT term, df
 FROM fts_main_documents.term_stats
@@ -82,6 +93,21 @@ ORDER BY term
 ----
 chirping	1
 mark	2
+
+query I rowsort
+SELECT docname
+FROM fts_main_documents.search_layered_bm25('mark', fields := 'author', enable_short_fuzzy := false, expand_exact_terms := false)
+----
+doc2
+doc4
+
+query I rowsort
+SELECT docname
+FROM fts_main_documents.search_layered_bm25('mark', fields := 'author', enable_short_fuzzy := false, expand_exact_terms := true)
+----
+doc2
+doc4
+doc5
 
 query I
 SELECT CASE WHEN count(*) > 0 THEN 1 ELSE 0 END
@@ -107,6 +133,14 @@ SELECT count(*) FROM fts_main_documents.term_stats WHERE term = 'meowing'
 
 query I
 SELECT count(*)
+FROM fts_main_documents.term_grams AS tg
+LEFT JOIN fts_main_documents.term_stats AS ts USING (termid)
+WHERE ts.termid IS NULL
+----
+0
+
+query I
+SELECT count(*)
 FROM fts_main_documents.search_layered_bm25('meow', fields := 'body', enable_short_fuzzy := false)
 ----
 0
@@ -127,3 +161,127 @@ WHERE table_schema = 'fts_main_plain_documents'
   AND table_name = 'term_stats'
 ----
 0
+
+statement ok
+CREATE TABLE static_layered_documents(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO static_layered_documents VALUES ('doc1', 'alpha alpha')
+
+statement ok
+PRAGMA create_fts_index('static_layered_documents', 'id', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I
+SELECT count(*)
+FROM information_schema.tables
+WHERE table_schema = 'fts_main_static_layered_documents'
+  AND table_name = 'term_stats'
+----
+1
+
+query I
+SELECT docname
+FROM fts_main_static_layered_documents.search_layered_bm25('alpha', enable_short_fuzzy := false)
+----
+doc1
+
+statement ok
+INSERT INTO static_layered_documents VALUES ('doc2', 'beta')
+
+query I
+SELECT count(*)
+FROM fts_main_static_layered_documents.search_layered_bm25('beta', enable_short_fuzzy := false)
+----
+0
+
+statement ok
+CREATE TABLE lifecycle_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO lifecycle_docs VALUES ('doc1', 'alpha beta')
+
+statement ok
+PRAGMA create_fts_index('lifecycle_docs', 'id', 'body', stemmer='none', stopwords='none', layered_search=true, incremental=true)
+
+query I
+SELECT count(*)
+FROM information_schema.tables
+WHERE table_schema = 'fts_main_lifecycle_docs'
+  AND table_name = 'term_stats'
+----
+1
+
+query I
+SELECT CASE WHEN count(*) > 0 THEN 1 ELSE 0 END
+FROM duckdb_triggers()
+WHERE trigger_name LIKE '__fts_fts_main_lifecycle_docs_%term_stats%'
+----
+1
+
+statement ok
+PRAGMA create_fts_index('lifecycle_docs', 'id', 'body', stemmer='none', stopwords='none', overwrite=true, incremental=true)
+
+query I
+SELECT count(*)
+FROM information_schema.tables
+WHERE table_schema = 'fts_main_lifecycle_docs'
+  AND table_name = 'term_stats'
+----
+0
+
+query I
+SELECT count(*)
+FROM duckdb_triggers()
+WHERE trigger_name LIKE '__fts_fts_main_lifecycle_docs_%term_stats%'
+----
+0
+
+statement ok
+PRAGMA drop_fts_index('lifecycle_docs')
+
+query I
+SELECT count(*)
+FROM duckdb_schemas()
+WHERE schema_name = 'fts_main_lifecycle_docs'
+----
+0
+
+query I
+SELECT count(*)
+FROM duckdb_triggers()
+WHERE trigger_name LIKE '__fts_fts_main_lifecycle_docs_%'
+----
+0
+
+statement ok
+CREATE TABLE "layered docs"(id VARCHAR NOT NULL, "bo""dy" VARCHAR)
+
+statement ok
+INSERT INTO "layered docs" VALUES ('docq', 'quoted quoted')
+
+statement ok
+PRAGMA create_fts_index('"layered docs"', 'id', 'bo"dy', stemmer='none', stopwords='none', layered_search=true, incremental=true)
+
+query I
+SELECT docname
+FROM "fts_main_layered docs".search_layered_bm25('quote', fields := 'bo"dy', enable_short_fuzzy := false)
+----
+docq
+
+statement ok
+ATTACH ':memory:' AS layered_attach
+
+statement ok
+CREATE TABLE layered_attach.main.docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO layered_attach.main.docs VALUES ('doca', 'attached attached')
+
+statement ok
+PRAGMA create_fts_index(layered_attach.main.docs, 'id', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I
+SELECT docname
+FROM layered_attach.fts_main_docs.search_layered_bm25('attach', enable_short_fuzzy := false)
+----
+doca

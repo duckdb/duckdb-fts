@@ -64,23 +64,19 @@ static vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
           prefix + "30_dict_prune", prefix + "40_stats"};
 }
 
-static vector<string> GetFTSLayeredInsertTriggerNames(
-    const QualifiedName &qname) {
+static vector<string>
+GetFTSLayeredInsertTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
-  return {prefix + "15_term_stats",
-          prefix + "16_term_stats_by_len",
-          prefix + "17_term_grams",
-          prefix + "35_term_stats_df",
+  return {prefix + "15_term_stats", prefix + "16_term_stats_by_len",
+          prefix + "17_term_grams", prefix + "35_term_stats_df",
           prefix + "36_term_stats_by_len_df"};
 }
 
-static vector<string> GetFTSLayeredDeleteTriggerNames(
-    const QualifiedName &qname) {
+static vector<string>
+GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
-  return {prefix + "23_term_stats_df",
-          prefix + "24_term_stats_by_len_df",
-          prefix + "25_term_grams_prune",
-          prefix + "26_term_stats_by_len_prune",
+  return {prefix + "23_term_stats_df", prefix + "24_term_stats_by_len_df",
+          prefix + "25_term_grams_prune", prefix + "26_term_stats_by_len_prune",
           prefix + "27_term_stats_prune"};
 }
 
@@ -466,7 +462,7 @@ static string MatchMacroScript() {
   // clang-format on
 }
 
-static string LayeredSearchMacroScript() {
+static string LayeredSearchTableMacroScript() {
   // clang-format off
 	return R"(
         CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false) AS TABLE
@@ -731,7 +727,13 @@ static string LayeredSearchMacroScript() {
             WHERE top_k IS NULL
                OR rank <= top_k
             ORDER BY rank;
+    )";
+  // clang-format on
+}
 
+static string LayeredMatchMacroScript() {
+  // clang-format off
+	return R"(
         CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false) AS (
             SELECT score
             FROM %fts_schema%.search_layered_bm25(
@@ -755,6 +757,10 @@ static string LayeredSearchMacroScript() {
   // clang-format on
 }
 
+static string LayeredSearchMacroScript() {
+  return LayeredSearchTableMacroScript() + LayeredMatchMacroScript();
+}
+
 static string DropFTSTriggersScript(const QualifiedName &qname) {
   vector<string> statements;
   auto input_table = GetQualifiedTableName(qname);
@@ -774,37 +780,64 @@ static string IncrementalIndexSetupScript(const QualifiedName &qname) {
       SQLIdentifier::ToString(index_name));
 }
 
-static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname) {
+static string LayeredAffectedTermIdsSubquery(const string &token_ctes) {
+  // clang-format off
+	return token_ctes + R"(
+            SELECT DISTINCT d.termid
+            FROM stemmed_stopped AS ss
+            JOIN %fts_schema%.dict AS d ON ss.term = d.term
+        )";
+  // clang-format on
+}
+
+static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname,
+                                                 const string &token_ctes) {
   // clang-format off
 	string result = R"(
         CREATE TRIGGER %trigger_15_term_stats% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
             INSERT INTO %fts_schema%.term_stats (termid, term, df, term_len, gram_count)
-            SELECT d.termid,
-                   d.term,
-                   d.df,
-                   length(d.term)::BIGINT AS term_len,
-                   greatest(length(d.term) - 2, 0)::BIGINT AS gram_count
-            FROM %fts_schema%.dict AS d
-            WHERE d.term <> ''
+            %token_ctes%,
+            affected_terms AS (
+                SELECT DISTINCT d.termid,
+                       d.term,
+                       d.df
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON ss.term = d.term
+                WHERE d.term <> ''
+            )
+            SELECT affected_terms.termid,
+                   affected_terms.term,
+                   affected_terms.df,
+                   length(affected_terms.term)::BIGINT AS term_len,
+                   greatest(length(affected_terms.term) - 2, 0)::BIGINT AS gram_count
+            FROM affected_terms
+            WHERE affected_terms.term <> ''
               AND NOT EXISTS (
                   SELECT 1
                   FROM %fts_schema%.term_stats AS ts
-                  WHERE ts.termid = d.termid
+                  WHERE ts.termid = affected_terms.termid
               )
-            ORDER BY d.termid;
+            ORDER BY affected_terms.termid;
 
         CREATE TRIGGER %trigger_16_term_stats_by_len% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
             INSERT INTO %fts_schema%.term_stats_by_len (termid, term, df, term_len, gram_count)
+            %token_ctes%,
+            affected_terms AS (
+                SELECT DISTINCT d.termid
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON ss.term = d.term
+            )
             SELECT ts.termid,
                    ts.term,
                    ts.df,
                    ts.term_len,
                    ts.gram_count
             FROM %fts_schema%.term_stats AS ts
+            JOIN affected_terms USING (termid)
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM %fts_schema%.term_stats_by_len AS tsl
@@ -818,12 +851,20 @@ static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname) {
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
             INSERT INTO %fts_schema%.term_grams (gram, termid)
-            WITH grams AS (
+            %token_ctes%,
+            affected_terms AS (
+                SELECT DISTINCT d.termid
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON ss.term = d.term
+            ),
+            grams AS (
                 SELECT 'g' || lower(hex(substr(ts.term, i, 3))) AS gram,
                        ts.termid
                 FROM %fts_schema%.term_stats AS ts,
+                     affected_terms AS affected_terms,
                      range(1, ts.gram_count + 1) AS r(i)
-                WHERE ts.gram_count > 0
+                WHERE ts.termid = affected_terms.termid
+                  AND ts.gram_count > 0
                   AND NOT regexp_full_match(ts.term, '[0-9]+')
             )
             SELECT grams.gram,
@@ -849,10 +890,12 @@ static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname) {
                                SQLIdentifier::ToString(trigger_names[2]));
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
   return result;
 }
 
-static string LayeredInsertDFTriggerScript(const QualifiedName &qname) {
+static string LayeredInsertDFTriggerScript(const QualifiedName &qname,
+                                           const string &token_ctes) {
   // clang-format off
 	string result = R"(
         CREATE TRIGGER %trigger_35_term_stats_df% AFTER INSERT ON %input_table%
@@ -861,7 +904,10 @@ static string LayeredInsertDFTriggerScript(const QualifiedName &qname) {
             UPDATE %fts_schema%.term_stats AS ts
             SET df = d.df
             FROM %fts_schema%.dict AS d
-            WHERE ts.termid = d.termid;
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
 
         CREATE TRIGGER %trigger_36_term_stats_by_len_df% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
@@ -869,10 +915,14 @@ static string LayeredInsertDFTriggerScript(const QualifiedName &qname) {
             UPDATE %fts_schema%.term_stats_by_len AS ts
             SET df = d.df
             FROM %fts_schema%.dict AS d
-            WHERE ts.termid = d.termid;
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
     )";
   // clang-format on
 
+  auto affected_termids = LayeredAffectedTermIdsSubquery(token_ctes);
   auto trigger_names = GetFTSLayeredInsertTriggerNames(qname);
   result = StringUtil::Replace(result, "%trigger_35_term_stats_df%",
                                SQLIdentifier::ToString(trigger_names[3]));
@@ -880,10 +930,12 @@ static string LayeredInsertDFTriggerScript(const QualifiedName &qname) {
                                SQLIdentifier::ToString(trigger_names[4]));
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%affected_termids%", affected_termids);
   return result;
 }
 
-static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname) {
+static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname,
+                                                const string &token_ctes) {
   // clang-format off
 	string result = R"(
         CREATE TRIGGER %trigger_23_term_stats_df% AFTER DELETE ON %input_table%
@@ -892,7 +944,10 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname) {
             UPDATE %fts_schema%.term_stats AS ts
             SET df = d.df
             FROM %fts_schema%.dict AS d
-            WHERE ts.termid = d.termid;
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
 
         CREATE TRIGGER %trigger_24_term_stats_by_len_df% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
@@ -900,16 +955,22 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname) {
             UPDATE %fts_schema%.term_stats_by_len AS ts
             SET df = d.df
             FROM %fts_schema%.dict AS d
-            WHERE ts.termid = d.termid;
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
 
         CREATE TRIGGER %trigger_25_term_grams_prune% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
         FOR EACH STATEMENT
             DELETE FROM %fts_schema%.term_grams
             WHERE termid IN (
-                SELECT termid
-                FROM %fts_schema%.dict
-                WHERE df = 0
+                SELECT d.termid
+                FROM %fts_schema%.dict AS d
+                WHERE d.df = 0
+                  AND d.termid IN (
+                      %affected_termids%
+                  )
             );
 
         CREATE TRIGGER %trigger_26_term_stats_by_len_prune% AFTER DELETE ON %input_table%
@@ -917,9 +978,12 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname) {
         FOR EACH STATEMENT
             DELETE FROM %fts_schema%.term_stats_by_len
             WHERE termid IN (
-                SELECT termid
-                FROM %fts_schema%.dict
-                WHERE df = 0
+                SELECT d.termid
+                FROM %fts_schema%.dict AS d
+                WHERE d.df = 0
+                  AND d.termid IN (
+                      %affected_termids%
+                  )
             );
 
         CREATE TRIGGER %trigger_27_term_stats_prune% AFTER DELETE ON %input_table%
@@ -927,13 +991,17 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname) {
         FOR EACH STATEMENT
             DELETE FROM %fts_schema%.term_stats
             WHERE termid IN (
-                SELECT termid
-                FROM %fts_schema%.dict
-                WHERE df = 0
+                SELECT d.termid
+                FROM %fts_schema%.dict AS d
+                WHERE d.df = 0
+                  AND d.termid IN (
+                      %affected_termids%
+                  )
             );
     )";
   // clang-format on
 
+  auto affected_termids = LayeredAffectedTermIdsSubquery(token_ctes);
   auto trigger_names = GetFTSLayeredDeleteTriggerNames(qname);
   result = StringUtil::Replace(result, "%trigger_23_term_stats_df%",
                                SQLIdentifier::ToString(trigger_names[0]));
@@ -947,6 +1015,7 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname) {
                                SQLIdentifier::ToString(trigger_names[4]));
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%affected_termids%", affected_termids);
   return result;
 }
 
@@ -1115,10 +1184,11 @@ static string InsertTriggerScript(const QualifiedName &qname,
   result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
   result = StringUtil::Replace(
       result, "%layered_insert_new_terms_triggers%",
-      layered_search ? LayeredInsertNewTermsTriggerScript(qname) : "");
+      layered_search ? LayeredInsertNewTermsTriggerScript(qname, token_ctes)
+                     : "");
   result = StringUtil::Replace(
       result, "%layered_insert_df_triggers%",
-      layered_search ? LayeredInsertDFTriggerScript(qname) : "");
+      layered_search ? LayeredInsertDFTriggerScript(qname, token_ctes) : "");
   result = StringUtil::Replace(
       result, "%insert_terms_order_by%",
       layered_search ? "ORDER BY d.termid, ss.fieldid, ss.docid" : "");
@@ -1143,8 +1213,27 @@ static string InsertTriggerScript(const QualifiedName &qname,
 
 static string DeleteTriggerScript(const QualifiedName &qname,
                                   const string &input_id,
+                                  const vector<string> &input_values,
                                   bool layered_search) {
   // clang-format off
+	string tokenize_field_query = R"(
+        SELECT unnest(%fts_schema%.tokenize(fts_di.%input_value%)) AS w
+        FROM fts_old_rows AS fts_di
+    )";
+
+	string token_ctes = R"(
+        WITH tokenized AS (
+            %union_fields_query%
+        ),
+        stemmed_stopped AS (
+            SELECT stem(t.w, '%stemmer%') AS term
+            FROM tokenized AS t
+            WHERE t.w NOT NULL
+              AND t.w <> ''
+              AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+        )
+    )";
+
 	string result = R"(
         CREATE TRIGGER %trigger_00_dict_df% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
@@ -1191,8 +1280,18 @@ static string DeleteTriggerScript(const QualifiedName &qname,
             UPDATE %fts_schema%.stats
             SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
                 avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
-    )";
+  )";
   // clang-format on
+
+  vector<string> tokenize_fields;
+  for (auto &input_value : input_values) {
+    auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
+                                     SQLIdentifier::ToString(input_value));
+    tokenize_fields.push_back(query);
+  }
+  token_ctes =
+      StringUtil::Replace(token_ctes, "%union_fields_query%",
+                          StringUtil::Join(tokenize_fields, " UNION ALL "));
 
   auto trigger_names = GetFTSDeleteTriggerNames(qname);
   result = StringUtil::Replace(result, "%trigger_00_dict_df%",
@@ -1207,7 +1306,8 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                                SQLIdentifier::ToString(trigger_names[4]));
   result = StringUtil::Replace(
       result, "%layered_delete_after_df_triggers%",
-      layered_search ? LayeredDeleteAfterDFTriggerScript(qname) : "");
+      layered_search ? LayeredDeleteAfterDFTriggerScript(qname, token_ctes)
+                     : "");
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
   result = StringUtil::Replace(result, "%input_id%",
@@ -1243,9 +1343,10 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   }
   if (incremental) {
     result += IncrementalIndexSetupScript(qname);
-    result += InsertTriggerScript(qname, input_id, input_values,
-                                  layered_search);
-    result += DeleteTriggerScript(qname, input_id, layered_search);
+    result +=
+        InsertTriggerScript(qname, input_id, input_values, layered_search);
+    result +=
+        DeleteTriggerScript(qname, input_id, input_values, layered_search);
   }
 
   string fts_schema = GetFTSSchema(qname);
