@@ -60,7 +60,7 @@ static vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname) {
 
 static vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
-  return {prefix + "00_terms", prefix + "10_docs", prefix + "20_dict_df",
+  return {prefix + "00_dict_df", prefix + "10_terms", prefix + "20_docs",
           prefix + "30_dict_prune", prefix + "40_stats"};
 }
 
@@ -507,11 +507,16 @@ static string InsertTriggerScript(const QualifiedName &qname,
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
             UPDATE %fts_schema%.dict AS d
-            SET df = (
-                SELECT count(DISTINCT docid)
+            SET df = d.df + inserted_df_delta.df_delta
+            FROM (
+                SELECT t.termid,
+                       COUNT(DISTINCT t.docid) AS df_delta
                 FROM %fts_schema%.terms AS t
-                WHERE d.termid = t.termid
-            );
+                JOIN %fts_schema%.docs AS docs ON t.docid = docs.docid
+                JOIN fts_new_rows AS new_rows ON docs.name = new_rows.%input_id%
+                GROUP BY t.termid
+            ) AS inserted_df_delta
+            WHERE d.termid = inserted_df_delta.termid;
 
         CREATE TRIGGER %trigger_40_stats% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
@@ -575,7 +580,22 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                                   const string &input_id) {
   // clang-format off
 	string result = R"(
-        CREATE TRIGGER %trigger_00_terms% AFTER DELETE ON %input_table%
+        CREATE TRIGGER %trigger_00_dict_df% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.dict AS d
+            SET df = d.df - deleted_df_delta.df_delta
+            FROM (
+                SELECT t.termid,
+                       COUNT(DISTINCT t.docid) AS df_delta
+                FROM %fts_schema%.terms AS t
+                JOIN %fts_schema%.docs AS docs ON t.docid = docs.docid
+                JOIN fts_old_rows AS old_rows ON docs.name = old_rows.%input_id%
+                GROUP BY t.termid
+            ) AS deleted_df_delta
+            WHERE d.termid = deleted_df_delta.termid;
+
+        CREATE TRIGGER %trigger_10_terms% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
         FOR EACH STATEMENT
             DELETE FROM %fts_schema%.terms
@@ -585,21 +605,11 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                 JOIN fts_old_rows AS old_rows ON d.name = old_rows.%input_id%
             );
 
-        CREATE TRIGGER %trigger_10_docs% AFTER DELETE ON %input_table%
+        CREATE TRIGGER %trigger_20_docs% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
         FOR EACH STATEMENT
             DELETE FROM %fts_schema%.docs
             WHERE name IN (SELECT %input_id% FROM fts_old_rows);
-
-        CREATE TRIGGER %trigger_20_dict_df% AFTER DELETE ON %input_table%
-        REFERENCING OLD TABLE AS fts_old_rows
-        FOR EACH STATEMENT
-            UPDATE %fts_schema%.dict AS d
-            SET df = (
-                SELECT count(DISTINCT docid)
-                FROM %fts_schema%.terms AS t
-                WHERE d.termid = t.termid
-            );
 
         CREATE TRIGGER %trigger_30_dict_prune% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
@@ -617,11 +627,11 @@ static string DeleteTriggerScript(const QualifiedName &qname,
   // clang-format on
 
   auto trigger_names = GetFTSDeleteTriggerNames(qname);
-  result = StringUtil::Replace(result, "%trigger_00_terms%",
+  result = StringUtil::Replace(result, "%trigger_00_dict_df%",
                                SQLIdentifier::ToString(trigger_names[0]));
-  result = StringUtil::Replace(result, "%trigger_10_docs%",
+  result = StringUtil::Replace(result, "%trigger_10_terms%",
                                SQLIdentifier::ToString(trigger_names[1]));
-  result = StringUtil::Replace(result, "%trigger_20_dict_df%",
+  result = StringUtil::Replace(result, "%trigger_20_docs%",
                                SQLIdentifier::ToString(trigger_names[2]));
   result = StringUtil::Replace(result, "%trigger_30_dict_prune%",
                                SQLIdentifier::ToString(trigger_names[3]));
@@ -790,6 +800,10 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   if (incremental && !ColumnHasNotNullConstraint(table, doc_id)) {
     throw InvalidInputException("incremental FTS indexes require the document "
                                 "id column to be NOT NULL");
+  }
+  if (incremental && cluster_terms) {
+    throw InvalidInputException("cluster_terms cannot be combined with "
+                                "incremental FTS indexes");
   }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,

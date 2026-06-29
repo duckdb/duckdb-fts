@@ -1,0 +1,211 @@
+# name: test/sql/fts/test_incremental_dict_df_delta.test
+# description: Test delta-maintained dictionary document frequencies for incremental FTS indexes
+# group: [fts]
+
+require fts
+
+require skip_reload
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE df_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO df_docs VALUES
+    ('doc1', 'hello hello hello'),
+    ('doc2', 'hello world')
+
+statement ok
+PRAGMA create_fts_index('df_docs', 'id', 'body', stemmer='porter', stopwords='none', incremental=true)
+
+query II
+SELECT term, df FROM fts_main_df_docs.dict ORDER BY term
+----
+hello	2
+world	1
+
+query I
+WITH recomputed AS (
+    SELECT termid, count(DISTINCT docid) AS df
+    FROM fts_main_df_docs.terms
+    GROUP BY termid
+),
+diffs AS (
+    SELECT COALESCE(d.termid, r.termid) AS termid
+    FROM fts_main_df_docs.dict AS d
+    FULL OUTER JOIN recomputed AS r USING (termid)
+    WHERE d.termid IS NULL
+       OR r.termid IS NULL
+       OR d.df IS DISTINCT FROM r.df
+)
+SELECT count(*) FROM diffs
+----
+0
+
+# Insert one document with repeated terms. `hello` should increment once, not by
+# the number of token occurrences in the document.
+statement ok
+INSERT INTO df_docs VALUES ('doc3', 'hello hello duck')
+
+query II
+SELECT term, df FROM fts_main_df_docs.dict ORDER BY term
+----
+duck	1
+hello	3
+world	1
+
+query I
+WITH recomputed AS (
+    SELECT termid, count(DISTINCT docid) AS df
+    FROM fts_main_df_docs.terms
+    GROUP BY termid
+),
+diffs AS (
+    SELECT COALESCE(d.termid, r.termid) AS termid
+    FROM fts_main_df_docs.dict AS d
+    FULL OUTER JOIN recomputed AS r USING (termid)
+    WHERE d.termid IS NULL
+       OR r.termid IS NULL
+       OR d.df IS DISTINCT FROM r.df
+)
+SELECT count(*) FROM diffs
+----
+0
+
+# Multi-row insert with shared terms should count documents, not rows or tokens.
+statement ok
+INSERT INTO df_docs VALUES
+    ('doc4', 'world world'),
+    ('doc5', 'hello world')
+
+query II
+SELECT term, df FROM fts_main_df_docs.dict ORDER BY term
+----
+duck	1
+hello	4
+world	3
+
+query I
+WITH recomputed AS (
+    SELECT termid, count(DISTINCT docid) AS df
+    FROM fts_main_df_docs.terms
+    GROUP BY termid
+),
+diffs AS (
+    SELECT COALESCE(d.termid, r.termid) AS termid
+    FROM fts_main_df_docs.dict AS d
+    FULL OUTER JOIN recomputed AS r USING (termid)
+    WHERE d.termid IS NULL
+       OR r.termid IS NULL
+       OR d.df IS DISTINCT FROM r.df
+)
+SELECT count(*) FROM diffs
+----
+0
+
+# Delete one document with repeated terms.
+statement ok
+DELETE FROM df_docs WHERE id = 'doc1'
+
+query II
+SELECT term, df FROM fts_main_df_docs.dict ORDER BY term
+----
+duck	1
+hello	3
+world	3
+
+query I
+WITH recomputed AS (
+    SELECT termid, count(DISTINCT docid) AS df
+    FROM fts_main_df_docs.terms
+    GROUP BY termid
+),
+diffs AS (
+    SELECT COALESCE(d.termid, r.termid) AS termid
+    FROM fts_main_df_docs.dict AS d
+    FULL OUTER JOIN recomputed AS r USING (termid)
+    WHERE d.termid IS NULL
+       OR r.termid IS NULL
+       OR d.df IS DISTINCT FROM r.df
+)
+SELECT count(*) FROM diffs
+----
+0
+
+# Delete the last document containing a term; the dictionary row should be
+# pruned after its df reaches zero.
+statement ok
+DELETE FROM df_docs WHERE id = 'doc3'
+
+query II
+SELECT term, df FROM fts_main_df_docs.dict ORDER BY term
+----
+hello	2
+world	3
+
+query I
+WITH recomputed AS (
+    SELECT termid, count(DISTINCT docid) AS df
+    FROM fts_main_df_docs.terms
+    GROUP BY termid
+),
+diffs AS (
+    SELECT COALESCE(d.termid, r.termid) AS termid
+    FROM fts_main_df_docs.dict AS d
+    FULL OUTER JOIN recomputed AS r USING (termid)
+    WHERE d.termid IS NULL
+       OR r.termid IS NULL
+       OR d.df IS DISTINCT FROM r.df
+)
+SELECT count(*) FROM diffs
+----
+0
+
+# Logical update pattern: delete a document and insert its replacement with the
+# same document id.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+DELETE FROM df_docs WHERE id = 'doc2'
+
+statement ok
+INSERT INTO df_docs VALUES ('doc2', 'hello hello zebra')
+
+statement ok
+COMMIT
+
+query II
+SELECT term, df FROM fts_main_df_docs.dict ORDER BY term
+----
+hello	2
+world	2
+zebra	1
+
+query I
+WITH recomputed AS (
+    SELECT termid, count(DISTINCT docid) AS df
+    FROM fts_main_df_docs.terms
+    GROUP BY termid
+),
+diffs AS (
+    SELECT COALESCE(d.termid, r.termid) AS termid
+    FROM fts_main_df_docs.dict AS d
+    FULL OUTER JOIN recomputed AS r USING (termid)
+    WHERE d.termid IS NULL
+       OR r.termid IS NULL
+       OR d.df IS DISTINCT FROM r.df
+)
+SELECT count(*) FROM diffs
+----
+0
+
+query I rowsort
+SELECT id FROM (
+    SELECT *, fts_main_df_docs.match_bm25(id, 'zebra') AS score
+    FROM df_docs
+) sq
+WHERE score IS NOT NULL
+----
+doc2
