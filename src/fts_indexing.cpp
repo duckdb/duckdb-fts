@@ -115,9 +115,8 @@ static string GetFTSTermGramsGramIndex(const QualifiedName &qname) {
 }
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
-  return Catalog::GetEntry<TableCatalogEntry>(context, qname,
-                                              OnEntryNotFound::RETURN_NULL) !=
-         nullptr;
+  return Catalog::GetEntry<TableCatalogEntry>(
+             context, qname, OnEntryNotFound::RETURN_NULL) != nullptr;
 }
 
 static bool SupportsFTSTriggers(ClientContext &context,
