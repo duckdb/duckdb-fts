@@ -396,13 +396,35 @@ static string MatchMacroScript() {
   // clang-format off
 	return R"(
         CREATE MACRO %fts_schema%.match_bm25(docname, query_string, fields := NULL, k := 1.2, b := 0.75, conjunctive := false) AS (
-            WITH tokens AS (
-                SELECT DISTINCT stem(unnest(%fts_schema%.tokenize(query_string)), '%stemmer%') AS t
+            WITH raw_tokens AS (
+                SELECT DISTINCT raw_token
+                FROM (
+                    SELECT unnest(%fts_schema%.tokenize(query_string)) AS raw_token
+                ) AS tokenized_query
+                WHERE raw_token IS NOT NULL
+                  AND raw_token <> ''
+                  AND raw_token NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+            ),
+            tokens AS (
+                SELECT t
+                FROM (
+                    SELECT DISTINCT stem(raw_token, '%stemmer%') AS t
+                    FROM raw_tokens
+                ) AS stemmed_tokens
+                WHERE t IS NOT NULL
+                  AND t <> ''
+            ),
+            requested_fields AS (
+                SELECT trim(field_name) AS field
+                FROM (
+                    SELECT unnest(string_split(fields, ',')) AS field_name
+                ) AS split_fields
+                WHERE trim(field_name) <> ''
             ),
             fieldids AS (
-                SELECT fieldid
-                FROM %fts_schema%.fields
-                WHERE CASE WHEN fields IS NULL THEN 1 ELSE field IN (SELECT * FROM (SELECT UNNEST(string_split(fields, ','))) AS fsq) END
+                SELECT fts_fields.fieldid
+                FROM %fts_schema%.fields AS fts_fields
+                WHERE CASE WHEN fields IS NULL THEN 1 ELSE fts_fields.field IN (SELECT requested_fields.field FROM requested_fields) END
             ),
             qtermids AS (
                 SELECT termid
@@ -490,17 +512,21 @@ static string LayeredSearchTableMacroScript() {
                   AND raw_token <> ''
                   AND raw_token NOT IN (SELECT sw FROM %fts_schema%.stopwords)
             ),
+            stemmed_tokens AS (
+                SELECT DISTINCT query_term
+                FROM (
+                    SELECT stem(raw_token, '%stemmer%') AS query_term
+                    FROM raw_tokens
+                ) AS stemmed_query
+                WHERE query_term IS NOT NULL
+                  AND query_term <> ''
+            ),
             query_tokens AS (
                 SELECT query_term,
                        length(query_term)::BIGINT AS query_len,
                        greatest(length(query_term) - 2, 0)::BIGINT AS query_gram_count,
                        regexp_full_match(query_term, '[0-9]+') AS is_numeric
-                FROM (
-                    SELECT stem(raw_token, '%stemmer%') AS query_term
-                    FROM raw_tokens
-                ) AS stemmed_tokens
-                WHERE query_term IS NOT NULL
-                  AND query_term <> ''
+                FROM stemmed_tokens
             ),
             exact_terms AS (
                 SELECT query_tokens.query_term,
@@ -640,6 +666,37 @@ static string LayeredSearchTableMacroScript() {
                   AND term_stats.term <> expansion_tokens.query_term
                   AND damerau_levenshtein(expansion_tokens.query_term, term_stats.term) <= 1
             ),
+            expansion_candidates AS (
+                SELECT *
+                FROM gram_expansions
+                WHERE expansion_weight IS NOT NULL
+                UNION ALL
+                SELECT *
+                FROM short_fuzzy_expansions
+            ),
+            deduped_expansions AS (
+                SELECT query_term,
+                       termid,
+                       term,
+                       df,
+                       expansion_weight,
+                       match_type
+                FROM (
+                    SELECT *,
+                           row_number() OVER (
+                               PARTITION BY query_term,
+                                            termid
+                               ORDER BY expansion_weight DESC,
+                                        df ASC,
+                                        length(term) ASC,
+                                        term ASC,
+                                        termid ASC,
+                                        match_type ASC
+                           ) AS dedupe_rank
+                    FROM expansion_candidates
+                ) AS ranked_candidates
+                WHERE dedupe_rank = 1
+            ),
             limited_expansions AS (
                 SELECT *,
                        row_number() OVER (
@@ -650,14 +707,7 @@ static string LayeredSearchTableMacroScript() {
                                     term ASC,
                                     termid ASC
                        ) AS expansion_rank
-                FROM (
-                    SELECT *
-                    FROM gram_expansions
-                    WHERE expansion_weight IS NOT NULL
-                    UNION ALL
-                    SELECT *
-                    FROM short_fuzzy_expansions
-                ) AS expansions
+                FROM deduped_expansions
             ),
             selected_terms AS (
                 SELECT query_term,
@@ -683,9 +733,15 @@ static string LayeredSearchTableMacroScript() {
                          termid
             ),
             fieldids AS (
-                SELECT fieldid
-                FROM %fts_schema%.fields
-                WHERE CASE WHEN fields IS NULL THEN true ELSE field IN (SELECT * FROM (SELECT unnest(string_split(fields, ','))) AS fsq) END
+                SELECT fts_fields.fieldid
+                FROM %fts_schema%.fields AS fts_fields
+                WHERE CASE WHEN fields IS NULL THEN true ELSE fts_fields.field IN (
+                    SELECT trim(field_name) AS field
+                    FROM (
+                        SELECT unnest(string_split(fields, ',')) AS field_name
+                    ) AS split_fields
+                    WHERE trim(field_name) <> ''
+                ) END
             ),
             term_tf AS (
                 SELECT selected_terms.termid,

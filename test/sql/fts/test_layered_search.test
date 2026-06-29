@@ -342,3 +342,54 @@ SELECT count(*)
 FROM fts_main_custom_stopword_docs.search_layered_bm25('noise', enable_short_fuzzy := false)
 ----
 0
+
+statement ok
+CREATE TABLE layered_stem_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO layered_stem_docs VALUES ('doc1', 'preconnectpost')
+
+statement ok
+PRAGMA create_fts_index('layered_stem_docs', 'id', 'body', stemmer='porter', stopwords='none', layered_search=true)
+
+query I
+SELECT docname
+FROM fts_main_layered_stem_docs.search_layered_bm25(
+    'connected connection',
+    enable_prefix := false,
+    enable_substring := true,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+doc1
+
+statement ok
+CREATE TABLE layered_limit_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO layered_limit_docs VALUES ('doc1', 'quack'), ('doc2', 'quark')
+
+statement ok
+PRAGMA create_fts_index('layered_limit_docs', 'id', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I rowsort
+SELECT docname
+FROM fts_main_layered_limit_docs.search_layered_bm25(
+    'quak',
+    term_limit := 2,
+    enable_prefix := true,
+    enable_substring := false,
+    enable_fuzzy := true,
+    enable_short_fuzzy := true
+)
+----
+doc1
+doc2
+
+query I rowsort
+SELECT docname
+FROM fts_main_documents.search_layered_bm25('mark', fields := ' author ', enable_short_fuzzy := false)
+----
+doc2
+doc4
