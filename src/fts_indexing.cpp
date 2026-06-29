@@ -482,14 +482,23 @@ static string LayeredSearchTableMacroScript() {
                 CROSS JOIN params
             ),
             raw_tokens AS (
-                SELECT DISTINCT stem(unnest(%fts_schema%.tokenize(query_string)), '%stemmer%') AS query_term
+                SELECT DISTINCT raw_token
+                FROM (
+                    SELECT unnest(%fts_schema%.tokenize(query_string)) AS raw_token
+                ) AS tokenized_query
+                WHERE raw_token IS NOT NULL
+                  AND raw_token <> ''
+                  AND raw_token NOT IN (SELECT sw FROM %fts_schema%.stopwords)
             ),
             query_tokens AS (
                 SELECT query_term,
                        length(query_term)::BIGINT AS query_len,
                        greatest(length(query_term) - 2, 0)::BIGINT AS query_gram_count,
                        regexp_full_match(query_term, '[0-9]+') AS is_numeric
-                FROM raw_tokens
+                FROM (
+                    SELECT stem(raw_token, '%stemmer%') AS query_term
+                    FROM raw_tokens
+                ) AS stemmed_tokens
                 WHERE query_term IS NOT NULL
                   AND query_term <> ''
             ),

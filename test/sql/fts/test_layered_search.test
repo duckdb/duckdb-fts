@@ -285,3 +285,60 @@ SELECT docname
 FROM layered_attach.fts_main_docs.search_layered_bm25('attach', enable_short_fuzzy := false)
 ----
 doca
+
+statement ok
+CREATE TABLE english_stopword_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO english_stopword_docs VALUES ('doc1', 'theme theme'), ('doc2', 'the theme')
+
+statement ok
+PRAGMA create_fts_index('english_stopword_docs', 'id', 'body', stemmer='none', stopwords='english', layered_search=true)
+
+query I
+SELECT count(*)
+FROM fts_main_english_stopword_docs.search_layered_bm25('the', enable_short_fuzzy := false)
+----
+0
+
+query I
+SELECT count(*)
+FROM fts_main_english_stopword_docs.search_layered_bm25('the theme', enable_short_fuzzy := false)
+----
+2
+
+statement ok
+CREATE TABLE no_stopword_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO no_stopword_docs VALUES ('doc1', 'the theme')
+
+statement ok
+PRAGMA create_fts_index('no_stopword_docs', 'id', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I
+SELECT docname
+FROM fts_main_no_stopword_docs.search_layered_bm25('the', enable_short_fuzzy := false)
+----
+doc1
+
+statement ok
+CREATE TABLE custom_stopwords(sw VARCHAR)
+
+statement ok
+INSERT INTO custom_stopwords VALUES ('noise')
+
+statement ok
+CREATE TABLE custom_stopword_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO custom_stopword_docs VALUES ('doc1', 'noisy noisy')
+
+statement ok
+PRAGMA create_fts_index('custom_stopword_docs', 'id', 'body', stemmer='none', stopwords='custom_stopwords', layered_search=true)
+
+query I
+SELECT count(*)
+FROM fts_main_custom_stopword_docs.search_layered_bm25('noise', enable_short_fuzzy := false)
+----
+0
