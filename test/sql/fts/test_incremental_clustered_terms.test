@@ -1,0 +1,419 @@
+# name: test/sql/fts/test_incremental_clustered_terms.test
+# description: Test clustered terms ordering with incremental FTS updates
+# group: [fts]
+
+require fts
+
+require skip_reload
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE clustered_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO clustered_docs VALUES
+    ('doc1', 'alpha beta alpha'),
+    ('doc2', 'beta gamma'),
+    ('doc3', 'delta')
+
+statement ok
+PRAGMA create_fts_index('clustered_docs', 'id', 'body', stemmer='none', stopwords='none', incremental=true, cluster_terms=true)
+
+query I
+SELECT count(*)
+FROM (
+    SELECT termid, fieldid, docid,
+           lag(termid) OVER () AS previous_termid,
+           lag(fieldid) OVER () AS previous_fieldid,
+           lag(docid) OVER () AS previous_docid
+    FROM fts_main_clustered_docs.terms
+) ordered_terms
+WHERE previous_termid IS NOT NULL
+  AND (
+      termid < previous_termid
+      OR (termid = previous_termid AND fieldid < previous_fieldid)
+      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
+  )
+----
+0
+
+statement ok
+INSERT INTO clustered_docs VALUES
+    ('doc4', 'alpha aardvark aardvark'),
+    ('doc5', 'gamma beta beta')
+
+query I
+SELECT count(*)
+FROM (
+    SELECT termid, fieldid, docid,
+           lag(termid) OVER () AS previous_termid,
+           lag(fieldid) OVER () AS previous_fieldid,
+           lag(docid) OVER () AS previous_docid
+    FROM fts_main_clustered_docs.terms
+) ordered_terms
+WHERE previous_termid IS NOT NULL
+  AND (
+      termid < previous_termid
+      OR (termid = previous_termid AND fieldid < previous_fieldid)
+      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
+  )
+----
+0
+
+query II
+SELECT term, df FROM fts_main_clustered_docs.dict ORDER BY term
+----
+aardvark	1
+alpha	2
+beta	3
+delta	1
+gamma	2
+
+query I
+WITH recomputed AS (
+    SELECT termid, count(DISTINCT docid) AS df
+    FROM fts_main_clustered_docs.terms
+    GROUP BY termid
+),
+diffs AS (
+    SELECT COALESCE(d.termid, r.termid) AS termid
+    FROM fts_main_clustered_docs.dict AS d
+    FULL OUTER JOIN recomputed AS r USING (termid)
+    WHERE d.termid IS NULL
+       OR r.termid IS NULL
+       OR d.df IS DISTINCT FROM r.df
+)
+SELECT count(*) FROM diffs
+----
+0
+
+statement ok
+DELETE FROM clustered_docs WHERE id IN ('doc3', 'doc4')
+
+query I
+SELECT count(*)
+FROM (
+    SELECT termid, fieldid, docid,
+           lag(termid) OVER () AS previous_termid,
+           lag(fieldid) OVER () AS previous_fieldid,
+           lag(docid) OVER () AS previous_docid
+    FROM fts_main_clustered_docs.terms
+) ordered_terms
+WHERE previous_termid IS NOT NULL
+  AND (
+      termid < previous_termid
+      OR (termid = previous_termid AND fieldid < previous_fieldid)
+      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
+  )
+----
+0
+
+query II
+SELECT term, df FROM fts_main_clustered_docs.dict ORDER BY term
+----
+alpha	1
+beta	3
+gamma	2
+
+query I
+SELECT count(*)
+FROM fts_main_clustered_docs.terms AS t
+LEFT JOIN fts_main_clustered_docs.docs AS d ON t.docid = d.docid
+WHERE d.docid IS NULL
+----
+0
+
+query I
+SELECT count(*)
+FROM fts_main_clustered_docs.terms AS t
+LEFT JOIN fts_main_clustered_docs.dict AS dict ON t.termid = dict.termid
+WHERE dict.termid IS NULL
+----
+0
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+DELETE FROM clustered_docs WHERE id = 'doc2'
+
+statement ok
+INSERT INTO clustered_docs VALUES ('doc2', 'gamma zebra zebra')
+
+statement ok
+COMMIT
+
+query II
+SELECT term, df FROM fts_main_clustered_docs.dict ORDER BY term
+----
+alpha	1
+beta	2
+gamma	2
+zebra	1
+
+query I
+SELECT count(*)
+FROM (
+    SELECT termid, fieldid, docid,
+           lag(termid) OVER () AS previous_termid,
+           lag(fieldid) OVER () AS previous_fieldid,
+           lag(docid) OVER () AS previous_docid
+    FROM fts_main_clustered_docs.terms
+) ordered_terms
+WHERE previous_termid IS NOT NULL
+  AND (
+      termid < previous_termid
+      OR (termid = previous_termid AND fieldid < previous_fieldid)
+      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
+  )
+----
+0
+
+query I rowsort
+SELECT id FROM (
+    SELECT *, fts_main_clustered_docs.match_bm25(id, 'zebra') AS score
+    FROM clustered_docs
+) sq
+WHERE score IS NOT NULL
+----
+doc2
+
+query I
+SELECT count(*) FROM (
+    SELECT *, fts_main_clustered_docs.match_bm25(id, 'delta') AS score
+    FROM clustered_docs
+) sq
+WHERE score IS NOT NULL
+----
+0
+
+# Clustered incremental indexes expose `terms` as an ordered view backed by an
+# internal storage table. Non-incremental clustered indexes keep `terms` as a
+# physical table.
+statement ok
+CREATE TABLE clustered_static_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO clustered_static_docs VALUES ('doc1', 'alpha beta'), ('doc2', 'beta gamma')
+
+statement ok
+PRAGMA create_fts_index('clustered_static_docs', 'id', 'body', stemmer='none', stopwords='none', cluster_terms=true)
+
+query I
+SELECT count(*) FROM duckdb_views()
+WHERE schema_name = 'fts_main_clustered_static_docs'
+  AND view_name = 'terms'
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_tables()
+WHERE schema_name = 'fts_main_clustered_static_docs'
+  AND table_name = 'terms'
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_views()
+WHERE schema_name = 'fts_main_clustered_docs'
+  AND view_name = 'terms'
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_tables()
+WHERE schema_name = 'fts_main_clustered_docs'
+  AND table_name = '__terms_storage'
+----
+1
+
+# Dropping a clustered incremental index removes triggers, view, and backing
+# storage through the FTS schema.
+statement ok
+CREATE TABLE drop_clustered_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO drop_clustered_docs VALUES ('doc1', 'alpha beta')
+
+statement ok
+PRAGMA create_fts_index('drop_clustered_docs', 'id', 'body', stemmer='none', stopwords='none', incremental=true, cluster_terms=true)
+
+query I
+SELECT count(*) FROM duckdb_triggers()
+WHERE trigger_name LIKE '__fts_fts_main_drop_clustered_docs_%'
+----
+10
+
+statement ok
+PRAGMA drop_fts_index('drop_clustered_docs')
+
+query I
+SELECT count(*) FROM duckdb_schemas()
+WHERE schema_name = 'fts_main_drop_clustered_docs'
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_triggers()
+WHERE trigger_name LIKE '__fts_fts_main_drop_clustered_docs_%'
+----
+0
+
+# Overwrite transitions should remove old trigger/view/table state cleanly.
+statement ok
+CREATE TABLE overwrite_clustered_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO overwrite_clustered_docs VALUES ('doc1', 'alpha beta')
+
+statement ok
+PRAGMA create_fts_index('overwrite_clustered_docs', 'id', 'body', stemmer='none', stopwords='none', incremental=true, cluster_terms=true)
+
+statement ok
+PRAGMA create_fts_index('overwrite_clustered_docs', 'id', 'body', stemmer='none', stopwords='none', overwrite=true)
+
+query I
+SELECT count(*) FROM duckdb_triggers()
+WHERE trigger_name LIKE '__fts_fts_main_overwrite_clustered_docs_%'
+----
+0
+
+query II
+SELECT
+    (SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND table_name = 'terms'),
+    (SELECT count(*) FROM duckdb_views() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND view_name = 'terms')
+----
+1	0
+
+statement ok
+PRAGMA create_fts_index('overwrite_clustered_docs', 'id', 'body', stemmer='none', stopwords='none', overwrite=true, incremental=true)
+
+query III
+SELECT
+    (SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND table_name = 'terms'),
+    (SELECT count(*) FROM duckdb_views() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND view_name = 'terms'),
+    (SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_fts_main_overwrite_clustered_docs_%')
+----
+1	0	10
+
+statement ok
+PRAGMA create_fts_index('overwrite_clustered_docs', 'id', 'body', stemmer='none', stopwords='none', overwrite=true, incremental=true, cluster_terms=true)
+
+query III
+SELECT
+    (SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND table_name = '__terms_storage'),
+    (SELECT count(*) FROM duckdb_views() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND view_name = 'terms'),
+    (SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_fts_main_overwrite_clustered_docs_%')
+----
+1	1	10
+
+statement ok
+INSERT INTO overwrite_clustered_docs VALUES ('doc2', 'aardvark alpha')
+
+query I
+SELECT count(*)
+FROM (
+    SELECT termid, fieldid, docid,
+           lag(termid) OVER () AS previous_termid,
+           lag(fieldid) OVER () AS previous_fieldid,
+           lag(docid) OVER () AS previous_docid
+    FROM fts_main_overwrite_clustered_docs.terms
+) ordered_terms
+WHERE previous_termid IS NOT NULL
+  AND (
+      termid < previous_termid
+      OR (termid = previous_termid AND fieldid < previous_fieldid)
+      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
+  )
+----
+0
+
+# Multiple indexed columns should preserve field ids and order by term, field,
+# then document.
+statement ok
+CREATE TABLE multi_field_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO multi_field_docs VALUES
+    ('doc1', 'alpha', 'beta alpha'),
+    ('doc2', 'beta', 'alpha gamma')
+
+statement ok
+PRAGMA create_fts_index('multi_field_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', incremental=true, cluster_terms=true)
+
+statement ok
+INSERT INTO multi_field_docs VALUES ('doc3', 'alpha', 'aardvark beta')
+
+query II rowsort
+SELECT fieldid, field FROM fts_main_multi_field_docs.fields
+----
+0	title
+1	body
+
+query III rowsort
+SELECT fields.field, dict.term, count(*) AS tf
+FROM fts_main_multi_field_docs.terms AS terms
+JOIN fts_main_multi_field_docs.fields AS fields ON fields.fieldid = terms.fieldid
+JOIN fts_main_multi_field_docs.dict AS dict ON dict.termid = terms.termid
+GROUP BY fields.field, dict.term
+----
+body	aardvark	1
+body	alpha	2
+body	beta	2
+body	gamma	1
+title	alpha	2
+title	beta	1
+
+query I
+SELECT count(*)
+FROM (
+    SELECT termid, fieldid, docid,
+           lag(termid) OVER () AS previous_termid,
+           lag(fieldid) OVER () AS previous_fieldid,
+           lag(docid) OVER () AS previous_docid
+    FROM fts_main_multi_field_docs.terms
+) ordered_terms
+WHERE previous_termid IS NOT NULL
+  AND (
+      termid < previous_termid
+      OR (termid = previous_termid AND fieldid < previous_fieldid)
+      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
+  )
+----
+0
+
+query I rowsort
+SELECT id FROM (
+    SELECT *, fts_main_multi_field_docs.match_bm25(id, 'aardvark', fields := 'body') AS score
+    FROM multi_field_docs
+) sq
+WHERE score IS NOT NULL
+----
+doc3
+
+# Stopword filtering should also apply to clustered incremental trigger writes.
+statement ok
+CREATE TABLE stopword_clustered_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO stopword_clustered_docs VALUES ('doc1', 'alpha the beta')
+
+statement ok
+PRAGMA create_fts_index('stopword_clustered_docs', 'id', 'body', stemmer='none', stopwords='english', incremental=true, cluster_terms=true)
+
+statement ok
+INSERT INTO stopword_clustered_docs VALUES ('doc2', 'the gamma the')
+
+query I
+SELECT count(*) FROM fts_main_stopword_clustered_docs.dict
+WHERE term = 'the'
+----
+0
+
+query II
+SELECT term, df FROM fts_main_stopword_clustered_docs.dict ORDER BY term
+----
+alpha	1
+beta	1
+gamma	1
