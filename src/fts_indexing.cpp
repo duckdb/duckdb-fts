@@ -75,8 +75,8 @@ static vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
 static vector<string>
 GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
-  return {prefix + "00_dict_df", prefix + "10_terms_store",
-          prefix + "20_docs", prefix + "30_dict_prune", prefix + "40_stats"};
+  return {prefix + "00_dict_df", prefix + "10_terms_store", prefix + "20_docs",
+          prefix + "30_dict_prune", prefix + "40_stats"};
 }
 
 static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
@@ -432,8 +432,7 @@ static string ClusteredIncrementalIndexSetupScript() {
       "DROP TABLE %%fts_schema%%.terms;\n"
       "CREATE VIEW %%fts_schema%%.terms AS SELECT termid, docid, fieldid FROM "
       "%%fts_schema%%.%s ORDER BY termid, fieldid, docid;",
-      GetFTSTermsStorageTable(),
-      GetFTSTermsStorageTable());
+      GetFTSTermsStorageTable(), GetFTSTermsStorageTable());
 }
 
 static string InsertTriggerScript(const QualifiedName &qname,
