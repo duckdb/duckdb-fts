@@ -22,7 +22,7 @@ The extension adds two `PRAGMA` statements to DuckDB: one to create, and one to 
 create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
                  stopwords = 'english', ignore = '(\\.|[^a-z])+',
                  strip_accents = 1, lower = 1, overwrite = 0,
-                 cluster_terms = 0)
+                 incremental = 0, cluster_terms = 0)
 ```
 
 `PRAGMA` that creates a FTS index for the specified table.
@@ -40,7 +40,8 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` |
 | `lower` | `BOOLEAN` | Whether to convert all text to lowercase. Defaults to `1` |
 | `overwrite` | `BOOLEAN` | Whether to overwrite an existing index on a table. Defaults to `0` |
-| `cluster_terms` | `BOOLEAN` | Whether to physically order the generated `terms` table by `termid`, `fieldid`, and `docid`. This can improve query-time pruning for direct reads from the FTS tables. Defaults to `0` |
+| `incremental` | `BOOLEAN` | Whether to maintain the FTS index with triggers after inserts and deletes on the input table. Defaults to `0` |
+| `cluster_terms` | `BOOLEAN` | Whether to order the generated `terms` relation by `termid`, `fieldid`, and `docid`. For non-incremental indexes this physically orders the `terms` table. With `incremental=1`, `terms` is exposed as an ordered view over internal incremental storage. Defaults to `0` |
 
 <!-- markdownlint-enable MD056 -->
 
