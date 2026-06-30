@@ -1,7 +1,5 @@
 # This file is included by DuckDB's build system. It specifies which extension to load
 
-duckdb_extension_load(json)
-
 # Extension from this repo
 duckdb_extension_load(fts
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
