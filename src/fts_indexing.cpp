@@ -19,10 +19,15 @@ namespace duckdb {
 static QualifiedName GetQualifiedName(ClientContext &context,
                                       const string &qname_str) {
   auto qname = QualifiedName::Parse(qname_str);
-  if (qname.Schema() == INVALID_SCHEMA) {
-    qname.SchemaMutable() =
+  if (qname.Schema().empty()) {
+    vector<Identifier> schema_path;
+    if (!qname.Catalog().empty()) {
+      schema_path.push_back(qname.Catalog());
+    }
+    schema_path.push_back(
         ClientData::Get(context).catalog_search_path->GetDefaultSchema(
-            qname.Catalog());
+            context, qname.Catalog()));
+    qname = qname.WithQualification(std::move(schema_path));
   }
   return qname;
 }
@@ -107,8 +112,7 @@ static string GetFTSTermsStorageTable() {
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
   return Catalog::GetEntry<TableCatalogEntry>(
-             context, qname.Catalog(), qname.Schema(), qname.Name(),
-             OnEntryNotFound::RETURN_NULL) != nullptr;
+             context, qname, OnEntryNotFound::RETURN_NULL) != nullptr;
 }
 
 static bool SupportsFTSTriggers(ClientContext &context,
@@ -1001,8 +1005,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
                                         const FunctionParameters &parameters) {
   auto qname =
       GetQualifiedName(context, StringValue::Get(parameters.values[0]));
-  Catalog::GetEntry<TableCatalogEntry>(context, qname.Catalog(), qname.Schema(),
-                                       qname.Name());
+  Catalog::GetEntry<TableCatalogEntry>(context, qname);
 
   // Named parameters
   auto get_string = [&](const string &name, const string &def) {
@@ -1030,8 +1033,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
-    Catalog::GetEntry<TableCatalogEntry>(context, sw_qname.Catalog(),
-                                         sw_qname.Schema(), sw_qname.Name());
+    Catalog::GetEntry<TableCatalogEntry>(context, sw_qname);
   }
 
   const string fts_schema = GetFTSSchema(qname);
@@ -1049,8 +1051,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
 
   // Positional parameters: table, id column, value column(s)
   const string doc_id = StringValue::Get(parameters.values[1]);
-  auto &table = Catalog::GetEntry<TableCatalogEntry>(
-      context, qname.Catalog(), qname.Schema(), qname.Name());
+  auto &table = Catalog::GetEntry<TableCatalogEntry>(context, qname);
   if (!table.ColumnExists(Identifier(doc_id))) {
     throw CatalogException("Table '%s.%s' does not have a column named '%s'!",
                            qname.Schema().GetIdentifierName(),
