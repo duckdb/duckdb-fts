@@ -71,6 +71,8 @@ static void LoadInternal(ExtensionLoader &loader) {
   create_fts_index_func.named_parameters["incremental"] = LogicalType::BOOLEAN;
   create_fts_index_func.named_parameters["cluster_terms"] =
       LogicalType::BOOLEAN;
+  create_fts_index_func.named_parameters["layered_search"] =
+      LogicalType::BOOLEAN;
 
   auto drop_fts_index_func = PragmaFunction::PragmaCall(
       "drop_fts_index", FTSIndexing::DropFTSIndexQuery, {LogicalType::VARCHAR});

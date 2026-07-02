@@ -84,8 +84,27 @@ GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname) {
           prefix + "30_dict_prune", prefix + "40_stats"};
 }
 
+static vector<string>
+GetFTSLayeredInsertTriggerNames(const QualifiedName &qname) {
+  auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
+  return {prefix + "15_term_stats", prefix + "16_term_stats_by_len",
+          prefix + "17_term_grams", prefix + "35_term_stats_df",
+          prefix + "36_term_stats_by_len_df"};
+}
+
+static vector<string>
+GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname) {
+  auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
+  return {prefix + "23_term_stats_df", prefix + "24_term_stats_by_len_df",
+          prefix + "25_term_grams_prune", prefix + "26_term_stats_by_len_prune",
+          prefix + "27_term_stats_prune"};
+}
+
 static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
   auto result = GetFTSInsertTriggerNames(qname);
+  auto layered_insert_triggers = GetFTSLayeredInsertTriggerNames(qname);
+  result.insert(result.end(), layered_insert_triggers.begin(),
+                layered_insert_triggers.end());
   auto delete_triggers = GetFTSDeleteTriggerNames(qname);
   result.insert(result.end(), delete_triggers.begin(), delete_triggers.end());
   auto clustered_insert_triggers = GetFTSClusteredInsertTriggerNames(qname);
@@ -94,6 +113,9 @@ static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
   auto clustered_delete_triggers = GetFTSClusteredDeleteTriggerNames(qname);
   result.insert(result.end(), clustered_delete_triggers.begin(),
                 clustered_delete_triggers.end());
+  auto layered_delete_triggers = GetFTSLayeredDeleteTriggerNames(qname);
+  result.insert(result.end(), layered_delete_triggers.begin(),
+                layered_delete_triggers.end());
   return result;
 }
 
@@ -108,6 +130,16 @@ static string GetFTSBuildDictTable(const QualifiedName &qname) {
 
 static string GetFTSTermsStorageTable() {
   return SQLIdentifier::ToString("__terms_storage");
+}
+
+static string GetFTSTermStatsTermIndex(const QualifiedName &qname) {
+  return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
+                                 "_term_stats_term_idx");
+}
+
+static string GetFTSTermGramsGramIndex(const QualifiedName &qname) {
+  return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
+                                 "_term_grams_gram_idx");
 }
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
@@ -340,17 +372,88 @@ static string IndexTablesScript(const string &input_id,
   return result;
 }
 
+static string LayeredSidecarScript(const QualifiedName &qname) {
+  // clang-format off
+	string result = R"(
+        CREATE TABLE %fts_schema%.term_stats AS
+        SELECT termid,
+               term,
+               df,
+               length(term)::BIGINT AS term_len,
+               greatest(length(term) - 2, 0)::BIGINT AS gram_count
+        FROM %fts_schema%.dict
+        WHERE term <> '';
+
+        CREATE TABLE %fts_schema%.term_stats_by_len AS
+        SELECT termid,
+               term,
+               df,
+               term_len,
+               gram_count
+        FROM %fts_schema%.term_stats
+        ORDER BY term_len,
+                 df,
+                 termid;
+
+        CREATE TABLE %fts_schema%.term_grams AS
+        SELECT 'g' || lower(hex(substr(term, i, 3))) AS gram,
+               termid
+        FROM %fts_schema%.term_stats,
+             range(1, gram_count + 1) AS r(i)
+        WHERE gram_count > 0
+          AND NOT regexp_full_match(term, '[0-9]+')
+        ORDER BY gram,
+                 termid;
+
+        CREATE INDEX %term_stats_term_index% ON %fts_schema%.term_stats(term);
+        CREATE INDEX %term_grams_gram_index% ON %fts_schema%.term_grams(gram);
+
+        ANALYZE %fts_schema%.term_stats;
+        ANALYZE %fts_schema%.term_stats_by_len;
+        ANALYZE %fts_schema%.term_grams;
+    )";
+  // clang-format on
+
+  result = StringUtil::Replace(result, "%term_stats_term_index%",
+                               GetFTSTermStatsTermIndex(qname));
+  result = StringUtil::Replace(result, "%term_grams_gram_index%",
+                               GetFTSTermGramsGramIndex(qname));
+  return result;
+}
+
 static string MatchMacroScript() {
   // clang-format off
 	return R"(
         CREATE MACRO %fts_schema%.match_bm25(docname, query_string, fields := NULL, k := 1.2, b := 0.75, conjunctive := false) AS (
-            WITH tokens AS (
-                SELECT DISTINCT stem(unnest(%fts_schema%.tokenize(query_string)), '%stemmer%') AS t
+            WITH raw_tokens AS (
+                SELECT DISTINCT raw_token
+                FROM (
+                    SELECT unnest(%fts_schema%.tokenize(query_string)) AS raw_token
+                ) AS tokenized_query
+                WHERE raw_token IS NOT NULL
+                  AND raw_token <> ''
+                  AND raw_token NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+            ),
+            tokens AS (
+                SELECT t
+                FROM (
+                    SELECT DISTINCT stem(raw_token, '%stemmer%') AS t
+                    FROM raw_tokens
+                ) AS stemmed_tokens
+                WHERE t IS NOT NULL
+                  AND t <> ''
+            ),
+            requested_fields AS (
+                SELECT trim(field_name) AS field
+                FROM (
+                    SELECT unnest(string_split(fields, ',')) AS field_name
+                ) AS split_fields
+                WHERE trim(field_name) <> ''
             ),
             fieldids AS (
-                SELECT fieldid
-                FROM %fts_schema%.fields
-                WHERE CASE WHEN fields IS NULL THEN 1 ELSE field IN (SELECT * FROM (SELECT UNNEST(string_split(fields, ','))) AS fsq) END
+                SELECT fts_fields.fieldid
+                FROM %fts_schema%.fields AS fts_fields
+                WHERE CASE WHEN fields IS NULL THEN 1 ELSE fts_fields.field IN (SELECT requested_fields.field FROM requested_fields) END
             ),
             qtermids AS (
                 SELECT termid
@@ -410,6 +513,348 @@ static string MatchMacroScript() {
   // clang-format on
 }
 
+static string LayeredSearchTableMacroScript() {
+  // clang-format off
+	return R"(
+        CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false) AS TABLE
+            WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, enable_fuzzy, enable_short_fuzzy, expand_exact_terms) AS (
+                SELECT term_limit::BIGINT,
+                       max_df_ratio::DOUBLE,
+                       max_df::BIGINT,
+                       enable_prefix::BOOLEAN,
+                       enable_substring::BOOLEAN,
+                       enable_fuzzy::BOOLEAN,
+                       enable_short_fuzzy::BOOLEAN,
+                       expand_exact_terms::BOOLEAN
+            ),
+            df_cap(max_df) AS (
+                SELECT least(params.max_df, ceil(stats.num_docs * params.max_df_ratio)::BIGINT)
+                FROM %fts_schema%.stats AS stats
+                CROSS JOIN params
+            ),
+            raw_tokens AS (
+                SELECT DISTINCT raw_token
+                FROM (
+                    SELECT unnest(%fts_schema%.tokenize(query_string)) AS raw_token
+                ) AS tokenized_query
+                WHERE raw_token IS NOT NULL
+                  AND raw_token <> ''
+                  AND raw_token NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+            ),
+            stemmed_tokens AS (
+                SELECT DISTINCT query_term
+                FROM (
+                    SELECT stem(raw_token, '%stemmer%') AS query_term
+                    FROM raw_tokens
+                ) AS stemmed_query
+                WHERE query_term IS NOT NULL
+                  AND query_term <> ''
+            ),
+            query_tokens AS (
+                SELECT query_term,
+                       length(query_term)::BIGINT AS query_len,
+                       greatest(length(query_term) - 2, 0)::BIGINT AS query_gram_count,
+                       regexp_full_match(query_term, '[0-9]+') AS is_numeric
+                FROM stemmed_tokens
+            ),
+            exact_terms AS (
+                SELECT query_tokens.query_term,
+                       term_stats.termid,
+                       term_stats.term,
+                       term_stats.df,
+                       1.0::DOUBLE AS expansion_weight,
+                       'exact' AS match_type
+                FROM query_tokens
+                JOIN %fts_schema%.term_stats AS term_stats
+                  ON term_stats.term = query_tokens.query_term
+            ),
+            expansion_tokens AS (
+                SELECT query_tokens.*
+                FROM query_tokens
+                LEFT JOIN exact_terms
+                  ON exact_terms.query_term = query_tokens.query_term
+                CROSS JOIN params
+                WHERE params.expand_exact_terms
+                   OR exact_terms.termid IS NULL
+            ),
+            query_grams AS (
+                SELECT query_term,
+                       'g' || lower(hex(substr(query_term, i, 3))) AS gram
+                FROM expansion_tokens,
+                     range(1, query_gram_count + 1) AS r(i)
+                WHERE query_gram_count > 0
+                  AND NOT is_numeric
+            ),
+            gram_candidates AS (
+                SELECT query_grams.query_term,
+                       term_grams.termid,
+                       count(*)::BIGINT AS matching_grams
+                FROM query_grams
+                JOIN %fts_schema%.term_grams AS term_grams
+                  ON term_grams.gram = query_grams.gram
+                JOIN %fts_schema%.term_stats AS term_stats
+                  ON term_stats.termid = term_grams.termid
+                CROSS JOIN df_cap
+                WHERE term_stats.df <= df_cap.max_df
+                GROUP BY query_grams.query_term,
+                         term_grams.termid
+            ),
+            gram_expansions AS (
+                SELECT gram_candidates.query_term,
+                       term_stats.termid,
+                       term_stats.term,
+                       term_stats.df,
+                       CASE
+                           WHEN params.enable_prefix
+                            AND starts_with(term_stats.term, expansion_tokens.query_term)
+                            AND term_stats.term <> expansion_tokens.query_term
+                               THEN 0.85::DOUBLE
+                           WHEN params.enable_substring
+                            AND contains(term_stats.term, expansion_tokens.query_term)
+                            AND term_stats.term <> expansion_tokens.query_term
+                            AND gram_candidates.matching_grams = expansion_tokens.query_gram_count
+                               THEN 0.75::DOUBLE
+                           WHEN params.enable_fuzzy
+                            AND expansion_tokens.query_len >= 3
+                            AND gram_candidates.matching_grams >= greatest(1, expansion_tokens.query_gram_count - 1)
+                            AND abs(term_stats.term_len - expansion_tokens.query_len) <= CASE
+                                   WHEN expansion_tokens.query_len <= 4 THEN 1
+                                   WHEN expansion_tokens.query_len <= 8 THEN 2
+                                   ELSE 3
+                                END
+                            AND damerau_levenshtein(expansion_tokens.query_term, term_stats.term) <= CASE
+                                   WHEN expansion_tokens.query_len <= 4 THEN 1
+                                   WHEN expansion_tokens.query_len <= 8 THEN 2
+                                   ELSE 3
+                                END
+                               THEN greatest(
+                                   0.25::DOUBLE,
+                                   1.0::DOUBLE - (
+                                       damerau_levenshtein(expansion_tokens.query_term, term_stats.term)::DOUBLE
+                                       / greatest(expansion_tokens.query_len, term_stats.term_len)::DOUBLE
+                                   )
+                               )
+                           ELSE NULL
+                       END AS expansion_weight,
+                       CASE
+                           WHEN params.enable_prefix
+                            AND starts_with(term_stats.term, expansion_tokens.query_term)
+                            AND term_stats.term <> expansion_tokens.query_term
+                               THEN 'prefix'
+                           WHEN params.enable_substring
+                            AND contains(term_stats.term, expansion_tokens.query_term)
+                            AND term_stats.term <> expansion_tokens.query_term
+                            AND gram_candidates.matching_grams = expansion_tokens.query_gram_count
+                               THEN 'substring'
+                           WHEN params.enable_fuzzy
+                            AND expansion_tokens.query_len >= 3
+                            AND gram_candidates.matching_grams >= greatest(1, expansion_tokens.query_gram_count - 1)
+                            AND abs(term_stats.term_len - expansion_tokens.query_len) <= CASE
+                                   WHEN expansion_tokens.query_len <= 4 THEN 1
+                                   WHEN expansion_tokens.query_len <= 8 THEN 2
+                                   ELSE 3
+                                END
+                            AND damerau_levenshtein(expansion_tokens.query_term, term_stats.term) <= CASE
+                                   WHEN expansion_tokens.query_len <= 4 THEN 1
+                                   WHEN expansion_tokens.query_len <= 8 THEN 2
+                                   ELSE 3
+                                END
+                               THEN 'fuzzy'
+                           ELSE NULL
+                       END AS match_type
+                FROM gram_candidates
+                JOIN expansion_tokens
+                  ON expansion_tokens.query_term = gram_candidates.query_term
+                JOIN %fts_schema%.term_stats AS term_stats
+                  ON term_stats.termid = gram_candidates.termid
+                CROSS JOIN params
+            ),
+            short_fuzzy_expansions AS (
+                SELECT expansion_tokens.query_term,
+                       term_stats.termid,
+                       term_stats.term,
+                       term_stats.df,
+                       greatest(
+                           0.25::DOUBLE,
+                           1.0::DOUBLE - (
+                               damerau_levenshtein(expansion_tokens.query_term, term_stats.term)::DOUBLE
+                               / greatest(expansion_tokens.query_len, term_stats.term_len)::DOUBLE
+                           )
+                       ) AS expansion_weight,
+                       'fuzzy' AS match_type
+                FROM expansion_tokens
+                JOIN %fts_schema%.term_stats_by_len AS term_stats
+                  ON term_stats.term_len BETWEEN expansion_tokens.query_len - 1 AND expansion_tokens.query_len + 1
+                CROSS JOIN params
+                CROSS JOIN df_cap
+                WHERE params.enable_fuzzy
+                  AND params.enable_short_fuzzy
+                  AND expansion_tokens.query_len BETWEEN 3 AND 5
+                  AND NOT expansion_tokens.is_numeric
+                  AND term_stats.df <= df_cap.max_df
+                  AND term_stats.term <> expansion_tokens.query_term
+                  AND damerau_levenshtein(expansion_tokens.query_term, term_stats.term) <= 1
+            ),
+            expansion_candidates AS (
+                SELECT *
+                FROM gram_expansions
+                WHERE expansion_weight IS NOT NULL
+                UNION ALL
+                SELECT *
+                FROM short_fuzzy_expansions
+            ),
+            deduped_expansions AS (
+                SELECT query_term,
+                       termid,
+                       term,
+                       df,
+                       expansion_weight,
+                       match_type
+                FROM (
+                    SELECT *,
+                           row_number() OVER (
+                               PARTITION BY query_term,
+                                            termid
+                               ORDER BY expansion_weight DESC,
+                                        df ASC,
+                                        length(term) ASC,
+                                        term ASC,
+                                        termid ASC,
+                                        match_type ASC
+                           ) AS dedupe_rank
+                    FROM expansion_candidates
+                ) AS ranked_candidates
+                WHERE dedupe_rank = 1
+            ),
+            limited_expansions AS (
+                SELECT *,
+                       row_number() OVER (
+                           PARTITION BY query_term
+                           ORDER BY expansion_weight DESC,
+                                    df ASC,
+                                    length(term) ASC,
+                                    term ASC,
+                                    termid ASC
+                       ) AS expansion_rank
+                FROM deduped_expansions
+            ),
+            selected_terms AS (
+                SELECT query_term,
+                       termid,
+                       any_value(term) AS term,
+                       any_value(match_type) AS match_type,
+                       max(expansion_weight) AS expansion_weight
+                FROM (
+                    SELECT *
+                    FROM exact_terms
+                    UNION ALL
+                    SELECT query_term,
+                           termid,
+                           term,
+                           df,
+                           expansion_weight,
+                           match_type
+                    FROM limited_expansions
+                    CROSS JOIN params
+                    WHERE expansion_rank <= params.term_limit
+                ) AS terms
+                GROUP BY query_term,
+                         termid
+            ),
+            fieldids AS (
+                SELECT fts_fields.fieldid
+                FROM %fts_schema%.fields AS fts_fields
+                WHERE CASE WHEN fields IS NULL THEN true ELSE fts_fields.field IN (
+                    SELECT trim(field_name) AS field
+                    FROM (
+                        SELECT unnest(string_split(fields, ',')) AS field_name
+                    ) AS split_fields
+                    WHERE trim(field_name) <> ''
+                ) END
+            ),
+            term_tf AS (
+                SELECT selected_terms.termid,
+                       terms.docid,
+                       max(selected_terms.expansion_weight) AS expansion_weight,
+                       count(*) AS tf
+                FROM selected_terms
+                JOIN %fts_schema%.terms AS terms
+                  ON terms.termid = selected_terms.termid
+                WHERE terms.fieldid IN (SELECT fieldid FROM fieldids)
+                GROUP BY selected_terms.termid,
+                         terms.docid
+            ),
+            scores AS (
+                SELECT docs.name AS docname,
+                       sum(
+                           term_tf.expansion_weight
+                           * log(((((stats.num_docs - dict.df) + 0.5) / (dict.df + 0.5)) + 1))
+                           * (
+                               (term_tf.tf * (k + 1))
+                               / (
+                                   term_tf.tf
+                                   + (
+                                       k
+                                       * ((1 - b) + (b * (docs.len / stats.avgdl)))
+                                   )
+                               )
+                           )
+                       ) AS score
+                FROM term_tf
+                JOIN %fts_schema%.docs AS docs
+                  ON docs.docid = term_tf.docid
+                JOIN %fts_schema%.dict AS dict
+                  ON dict.termid = term_tf.termid
+                CROSS JOIN %fts_schema%.stats AS stats
+                GROUP BY docs.name
+            ),
+            ranked AS (
+                SELECT docname,
+                       score,
+                       row_number() OVER (ORDER BY score DESC, docname) AS rank
+                FROM scores
+            )
+            SELECT docname,
+                   score,
+                   rank
+            FROM ranked
+            WHERE top_k IS NULL
+               OR rank <= top_k
+            ORDER BY rank;
+    )";
+  // clang-format on
+}
+
+static string LayeredMatchMacroScript() {
+  // clang-format off
+	return R"(
+        CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false) AS (
+            SELECT score
+            FROM %fts_schema%.search_layered_bm25(
+                query_string,
+                fields := fields,
+                top_k := NULL::BIGINT,
+                k := k,
+                b := b,
+                term_limit := term_limit,
+                max_df_ratio := max_df_ratio,
+                max_df := max_df,
+                enable_prefix := enable_prefix,
+                enable_substring := enable_substring,
+                enable_fuzzy := enable_fuzzy,
+                enable_short_fuzzy := enable_short_fuzzy,
+                expand_exact_terms := expand_exact_terms
+            ) AS hits
+            WHERE hits.docname = input_id
+        );
+    )";
+  // clang-format on
+}
+
+static string LayeredSearchMacroScript() {
+  return LayeredSearchTableMacroScript() + LayeredMatchMacroScript();
+}
+
 static string DropFTSTriggersScript(const QualifiedName &qname) {
   vector<string> statements;
   auto input_table = GetQualifiedTableName(qname);
@@ -439,9 +884,249 @@ static string ClusteredIncrementalIndexSetupScript() {
       GetFTSTermsStorageTable(), GetFTSTermsStorageTable());
 }
 
+static string LayeredAffectedTermIdsSubquery(const string &token_ctes) {
+  // clang-format off
+	return token_ctes + R"(
+            SELECT DISTINCT d.termid
+            FROM stemmed_stopped AS ss
+            JOIN %fts_schema%.dict AS d ON ss.term = d.term
+        )";
+  // clang-format on
+}
+
+static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname,
+                                                 const string &token_ctes) {
+  // clang-format off
+	string result = R"(
+        CREATE TRIGGER %trigger_15_term_stats% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.term_stats (termid, term, df, term_len, gram_count)
+            %token_ctes%,
+            affected_terms AS (
+                SELECT DISTINCT d.termid,
+                       d.term,
+                       d.df
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON ss.term = d.term
+                WHERE d.term <> ''
+            )
+            SELECT affected_terms.termid,
+                   affected_terms.term,
+                   affected_terms.df,
+                   length(affected_terms.term)::BIGINT AS term_len,
+                   greatest(length(affected_terms.term) - 2, 0)::BIGINT AS gram_count
+            FROM affected_terms
+            WHERE affected_terms.term <> ''
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM %fts_schema%.term_stats AS ts
+                  WHERE ts.termid = affected_terms.termid
+              )
+            ORDER BY affected_terms.termid;
+
+        CREATE TRIGGER %trigger_16_term_stats_by_len% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.term_stats_by_len (termid, term, df, term_len, gram_count)
+            %token_ctes%,
+            affected_terms AS (
+                SELECT DISTINCT d.termid
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON ss.term = d.term
+            )
+            SELECT ts.termid,
+                   ts.term,
+                   ts.df,
+                   ts.term_len,
+                   ts.gram_count
+            FROM %fts_schema%.term_stats AS ts
+            JOIN affected_terms USING (termid)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM %fts_schema%.term_stats_by_len AS tsl
+                WHERE tsl.termid = ts.termid
+            )
+            ORDER BY ts.term_len,
+                     ts.df,
+                     ts.termid;
+
+        CREATE TRIGGER %trigger_17_term_grams% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.term_grams (gram, termid)
+            %token_ctes%,
+            affected_terms AS (
+                SELECT DISTINCT d.termid
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON ss.term = d.term
+            ),
+            grams AS (
+                SELECT 'g' || lower(hex(substr(ts.term, i, 3))) AS gram,
+                       ts.termid
+                FROM %fts_schema%.term_stats AS ts,
+                     affected_terms AS affected_terms,
+                     range(1, ts.gram_count + 1) AS r(i)
+                WHERE ts.termid = affected_terms.termid
+                  AND ts.gram_count > 0
+                  AND NOT regexp_full_match(ts.term, '[0-9]+')
+            )
+            SELECT grams.gram,
+                   grams.termid
+            FROM grams
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM %fts_schema%.term_grams AS tg
+                WHERE tg.termid = grams.termid
+                  AND tg.gram = grams.gram
+            )
+            ORDER BY grams.gram,
+                     grams.termid;
+    )";
+  // clang-format on
+
+  auto trigger_names = GetFTSLayeredInsertTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_15_term_stats%",
+                               SQLIdentifier::ToString(trigger_names[0]));
+  result = StringUtil::Replace(result, "%trigger_16_term_stats_by_len%",
+                               SQLIdentifier::ToString(trigger_names[1]));
+  result = StringUtil::Replace(result, "%trigger_17_term_grams%",
+                               SQLIdentifier::ToString(trigger_names[2]));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
+  return result;
+}
+
+static string LayeredInsertDFTriggerScript(const QualifiedName &qname,
+                                           const string &token_ctes) {
+  // clang-format off
+	string result = R"(
+        CREATE TRIGGER %trigger_35_term_stats_df% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.term_stats AS ts
+            SET df = d.df
+            FROM %fts_schema%.dict AS d
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
+
+        CREATE TRIGGER %trigger_36_term_stats_by_len_df% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.term_stats_by_len AS ts
+            SET df = d.df
+            FROM %fts_schema%.dict AS d
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
+    )";
+  // clang-format on
+
+  auto affected_termids = LayeredAffectedTermIdsSubquery(token_ctes);
+  auto trigger_names = GetFTSLayeredInsertTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_35_term_stats_df%",
+                               SQLIdentifier::ToString(trigger_names[3]));
+  result = StringUtil::Replace(result, "%trigger_36_term_stats_by_len_df%",
+                               SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%affected_termids%", affected_termids);
+  return result;
+}
+
+static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname,
+                                                const string &token_ctes) {
+  // clang-format off
+	string result = R"(
+        CREATE TRIGGER %trigger_23_term_stats_df% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.term_stats AS ts
+            SET df = d.df
+            FROM %fts_schema%.dict AS d
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
+
+        CREATE TRIGGER %trigger_24_term_stats_by_len_df% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.term_stats_by_len AS ts
+            SET df = d.df
+            FROM %fts_schema%.dict AS d
+            WHERE ts.termid = d.termid
+              AND ts.termid IN (
+                  %affected_termids%
+              );
+
+        CREATE TRIGGER %trigger_25_term_grams_prune% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.term_grams
+            WHERE termid IN (
+                SELECT d.termid
+                FROM %fts_schema%.dict AS d
+                WHERE d.df = 0
+                  AND d.termid IN (
+                      %affected_termids%
+                  )
+            );
+
+        CREATE TRIGGER %trigger_26_term_stats_by_len_prune% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.term_stats_by_len
+            WHERE termid IN (
+                SELECT d.termid
+                FROM %fts_schema%.dict AS d
+                WHERE d.df = 0
+                  AND d.termid IN (
+                      %affected_termids%
+                  )
+            );
+
+        CREATE TRIGGER %trigger_27_term_stats_prune% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.term_stats
+            WHERE termid IN (
+                SELECT d.termid
+                FROM %fts_schema%.dict AS d
+                WHERE d.df = 0
+                  AND d.termid IN (
+                      %affected_termids%
+                  )
+            );
+    )";
+  // clang-format on
+
+  auto affected_termids = LayeredAffectedTermIdsSubquery(token_ctes);
+  auto trigger_names = GetFTSLayeredDeleteTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_23_term_stats_df%",
+                               SQLIdentifier::ToString(trigger_names[0]));
+  result = StringUtil::Replace(result, "%trigger_24_term_stats_by_len_df%",
+                               SQLIdentifier::ToString(trigger_names[1]));
+  result = StringUtil::Replace(result, "%trigger_25_term_grams_prune%",
+                               SQLIdentifier::ToString(trigger_names[2]));
+  result = StringUtil::Replace(result, "%trigger_26_term_stats_by_len_prune%",
+                               SQLIdentifier::ToString(trigger_names[3]));
+  result = StringUtil::Replace(result, "%trigger_27_term_stats_prune%",
+                               SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%affected_termids%", affected_termids);
+  return result;
+}
+
 static string InsertTriggerScript(const QualifiedName &qname,
                                   const string &input_id,
-                                  const vector<string> &input_values) {
+                                  const vector<string> &input_values,
+                                  bool layered_search) {
   // clang-format off
 	string docs_new_docs_cte = R"(
         fts_new_docs AS (
@@ -531,6 +1216,8 @@ static string InsertTriggerScript(const QualifiedName &qname,
                    0 AS df
             FROM new_terms;
 
+        %layered_insert_new_terms_triggers%
+
         CREATE TRIGGER %trigger_20_terms% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
@@ -540,7 +1227,8 @@ static string InsertTriggerScript(const QualifiedName &qname,
                    ss.fieldid,
                    d.termid
             FROM stemmed_stopped AS ss
-            JOIN %fts_schema%.dict AS d ON ss.term = d.term;
+            JOIN %fts_schema%.dict AS d ON ss.term = d.term
+            %insert_terms_order_by%;
 
         CREATE TRIGGER %trigger_30_dict_df% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
@@ -556,6 +1244,8 @@ static string InsertTriggerScript(const QualifiedName &qname,
                 GROUP BY t.termid
             ) AS inserted_df_delta
             WHERE d.termid = inserted_df_delta.termid;
+
+        %layered_insert_df_triggers%
 
         CREATE TRIGGER %trigger_40_stats% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
@@ -596,8 +1286,18 @@ static string InsertTriggerScript(const QualifiedName &qname,
       StringUtil::Replace(result, "%union_fields_query%",
                           StringUtil::Join(tokenize_fields, " UNION ALL "));
   result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
+  result = StringUtil::Replace(
+      result, "%layered_insert_new_terms_triggers%",
+      layered_search ? LayeredInsertNewTermsTriggerScript(qname, token_ctes)
+                     : "");
+  result = StringUtil::Replace(
+      result, "%layered_insert_df_triggers%",
+      layered_search ? LayeredInsertDFTriggerScript(qname, token_ctes) : "");
+  result = StringUtil::Replace(
+      result, "%insert_terms_order_by%",
+      layered_search ? "ORDER BY d.termid, ss.fieldid, ss.docid" : "");
 
-  auto trigger_names = GetFTSTriggerNames(qname);
+  auto trigger_names = GetFTSInsertTriggerNames(qname);
   result = StringUtil::Replace(result, "%trigger_00_docs%",
                                SQLIdentifier::ToString(trigger_names[0]));
   result = StringUtil::Replace(result, "%trigger_10_dict_insert%",
@@ -794,8 +1494,28 @@ static string ClusteredInsertTriggerScript(const QualifiedName &qname,
 }
 
 static string DeleteTriggerScript(const QualifiedName &qname,
-                                  const string &input_id) {
+                                  const string &input_id,
+                                  const vector<string> &input_values,
+                                  bool layered_search) {
   // clang-format off
+	string tokenize_field_query = R"(
+        SELECT unnest(%fts_schema%.tokenize(fts_di.%input_value%)) AS w
+        FROM fts_old_rows AS fts_di
+    )";
+
+	string token_ctes = R"(
+        WITH tokenized AS (
+            %union_fields_query%
+        ),
+        stemmed_stopped AS (
+            SELECT stem(t.w, '%stemmer%') AS term
+            FROM tokenized AS t
+            WHERE t.w NOT NULL
+              AND t.w <> ''
+              AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+        )
+    )";
+
 	string result = R"(
         CREATE TRIGGER %trigger_00_dict_df% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
@@ -828,6 +1548,8 @@ static string DeleteTriggerScript(const QualifiedName &qname,
             DELETE FROM %fts_schema%.docs
             WHERE name IN (SELECT %input_id% FROM fts_old_rows);
 
+        %layered_delete_after_df_triggers%
+
         CREATE TRIGGER %trigger_30_dict_prune% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
         FOR EACH STATEMENT
@@ -840,8 +1562,18 @@ static string DeleteTriggerScript(const QualifiedName &qname,
             UPDATE %fts_schema%.stats
             SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
                 avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
-    )";
+  )";
   // clang-format on
+
+  vector<string> tokenize_fields;
+  for (auto &input_value : input_values) {
+    auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
+                                     SQLIdentifier::ToString(input_value));
+    tokenize_fields.push_back(query);
+  }
+  token_ctes =
+      StringUtil::Replace(token_ctes, "%union_fields_query%",
+                          StringUtil::Join(tokenize_fields, " UNION ALL "));
 
   auto trigger_names = GetFTSDeleteTriggerNames(qname);
   result = StringUtil::Replace(result, "%trigger_00_dict_df%",
@@ -854,6 +1586,10 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                                SQLIdentifier::ToString(trigger_names[3]));
   result = StringUtil::Replace(result, "%trigger_40_stats%",
                                SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(
+      result, "%layered_delete_after_df_triggers%",
+      layered_search ? LayeredDeleteAfterDFTriggerScript(qname, token_ctes)
+                     : "");
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
   result = StringUtil::Replace(result, "%input_id%",
@@ -940,7 +1676,8 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                              const vector<string> &input_values,
                              const string &stemmer, const string &stopwords,
                              const string &ignore, bool strip_accents,
-                             bool lower, bool incremental, bool cluster_terms) {
+                             bool lower, bool incremental, bool cluster_terms,
+                             bool layered_search) {
   string result;
   if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
     result += DropFTSTriggersScript(qname);
@@ -952,15 +1689,26 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                               GetFTSBuildTermsTable(qname),
                               GetFTSBuildDictTable(qname), cluster_terms);
   result += MatchMacroScript();
+  if (layered_search) {
+    result += LayeredSidecarScript(qname);
+    result += LayeredSearchMacroScript();
+  }
   if (incremental) {
     result += IncrementalIndexSetupScript(qname);
-    if (cluster_terms) {
+    if (layered_search) {
+      result +=
+          InsertTriggerScript(qname, input_id, input_values, layered_search);
+      result +=
+          DeleteTriggerScript(qname, input_id, input_values, layered_search);
+    } else if (cluster_terms) {
       result += ClusteredIncrementalIndexSetupScript();
       result += ClusteredInsertTriggerScript(qname, input_id, input_values);
       result += ClusteredDeleteTriggerScript(qname, input_id);
     } else {
-      result += InsertTriggerScript(qname, input_id, input_values);
-      result += DeleteTriggerScript(qname, input_id);
+      result +=
+          InsertTriggerScript(qname, input_id, input_values, layered_search);
+      result +=
+          DeleteTriggerScript(qname, input_id, input_values, layered_search);
     }
   }
 
@@ -1029,7 +1777,8 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   const bool lower = get_bool("lower", true);
   const bool overwrite = get_bool("overwrite", false);
   const bool incremental = get_bool("incremental", false);
-  const bool cluster_terms = get_bool("cluster_terms", false);
+  const bool layered_search = get_bool("layered_search", false);
+  const bool cluster_terms = get_bool("cluster_terms", false) || layered_search;
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
@@ -1093,7 +1842,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   }
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
                         ignore, strip_accents, lower, incremental,
-                        cluster_terms);
+                        cluster_terms, layered_search);
 }
 
 } // namespace duckdb

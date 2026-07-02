@@ -211,6 +211,12 @@ SELECT id FROM (SELECT *, fts_main_documents.match_bm25(id, 'mark laurens', fiel
 doc2
 doc3
 
+query I
+SELECT id FROM (SELECT *, fts_main_documents.match_bm25(id, 'mark laurens', fields := 'body, author') AS score FROM documents) sq WHERE score IS NOT NULL ORDER BY score DESC
+----
+doc2
+doc3
+
 # if we don't search any fields, we won't get any results
 query I
 SELECT id FROM (SELECT *, fts_main_documents.match_bm25(id, 'hannes mark laurens', fields := '') AS score FROM documents) sq WHERE score IS NOT NULL ORDER BY score DESC
@@ -264,6 +270,11 @@ EXECUTE fts_query('quacked mark laurens')
 doc1	 QUÁCKING+QUÁCKING+QUÁCKING	Hannes
 doc2	 BÁRKING+BÁRKING+BÁRKING+BÁRKING	Mark
 doc3	 MÉOWING+MÉOWING+MÉOWING+MÉOWING+MÉOWING+999	Laurens
+
+query I
+SELECT id FROM (SELECT *, fts_main_documents.match_bm25(id, 'the mark', conjunctive := true) AS score FROM documents) sq WHERE score IS NOT NULL ORDER BY score DESC
+----
+doc2
 
 # document frequency remains document-based when terms repeat within documents
 statement ok
