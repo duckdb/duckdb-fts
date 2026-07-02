@@ -6,8 +6,8 @@ endif()
 
 # Extension from this repo
 duckdb_extension_load(fts
-        SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
-        INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/src/include
-        ${LOAD_FTS_TESTS}
-        ${FTS_DONT_LINK}
+    SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
+    INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/src/include
+    ${LOAD_FTS_TESTS}
+    ${FTS_DONT_LINK}
 )
