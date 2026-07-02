@@ -22,7 +22,9 @@ jobs:
 
   duckdb-stable-deploy:
     name: Deploy extension binaries
-    needs: duckdb-stable-build
+    needs:
+      - get-duckdb-version
+      - duckdb-stable-build
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
     secrets: inherit
     with:
