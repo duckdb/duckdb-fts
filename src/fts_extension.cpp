@@ -19,16 +19,38 @@
 namespace duckdb {
 
 static bool IsOpenSearchStandardSingleTokenScript(UScriptCode script) {
-  return script == USCRIPT_HAN || script == USCRIPT_HIRAGANA ||
-         script == USCRIPT_KATAKANA;
+  return script == USCRIPT_HAN || script == USCRIPT_HIRAGANA;
 }
 
-static bool IsOpenSearchStandardTokenChar(UChar32 codepoint) {
+static bool IsOpenSearchStandardEmoji(UChar32 codepoint) {
+  return u_hasBinaryProperty(codepoint, UCHAR_EMOJI_PRESENTATION) ||
+         u_hasBinaryProperty(codepoint, UCHAR_EXTENDED_PICTOGRAPHIC);
+}
+
+static bool IsOpenSearchStandardIntraTokenPunctuation(UChar32 codepoint) {
+  return codepoint == '\'' || codepoint == '.' || codepoint == '_';
+}
+
+static bool IsJapaneseProlongedSoundMark(UChar32 codepoint) {
+  return codepoint == 0x30FC || codepoint == 0xFF70;
+}
+
+static bool IsOpenSearchStandardTokenChar(UChar32 codepoint,
+                                          UScriptCode script) {
   if (u_isUWhiteSpace(codepoint) || u_ispunct(codepoint)) {
     return false;
   }
   return u_isalnum(codepoint) ||
-         u_hasBinaryProperty(codepoint, UCHAR_ALPHABETIC);
+         u_hasBinaryProperty(codepoint, UCHAR_ALPHABETIC) ||
+         script == USCRIPT_KATAKANA ||
+         IsJapaneseProlongedSoundMark(codepoint);
+}
+
+static bool IsOpenSearchStandardContinuationChar(UChar32 codepoint,
+                                                 UScriptCode script) {
+  return !IsOpenSearchStandardSingleTokenScript(script) &&
+         !IsOpenSearchStandardEmoji(codepoint) &&
+         IsOpenSearchStandardTokenChar(codepoint, script);
 }
 
 template <class LIST_WRITER>
@@ -47,25 +69,51 @@ static void TokenizeOpenSearchStandard(string_t input, LIST_WRITER &list) {
     token_size = 0;
   };
 
+  auto decode_codepoint = [&](idx_t pos, UChar32 &codepoint, int &char_size,
+                              UScriptCode &script) -> bool {
+    if (pos >= input_size) {
+      return false;
+    }
+    char_size = 0;
+    codepoint =
+        Utf8Proc::UTF8ToCodepoint(input_data + pos, char_size, input_size - pos);
+    if (char_size <= 0) {
+      return false;
+    }
+    UErrorCode status = U_ZERO_ERROR;
+    script = uscript_getScript(codepoint, &status);
+    return U_SUCCESS(status);
+  };
+
   for (idx_t pos = 0; pos < input_size;) {
     int char_size = 0;
-    auto codepoint =
-        Utf8Proc::UTF8ToCodepoint(input_data + pos, char_size, input_size - pos);
-    D_ASSERT(char_size > 0);
-
-    UErrorCode status = U_ZERO_ERROR;
-    auto script = uscript_getScript(codepoint, &status);
-    if (U_FAILURE(status)) {
+    UChar32 codepoint = 0;
+    UScriptCode script = USCRIPT_UNKNOWN;
+    if (!decode_codepoint(pos, codepoint, char_size, script)) {
       flush_token();
-      pos += UnsafeNumericCast<idx_t>(char_size);
+      pos++;
       continue;
     }
 
-    if (IsOpenSearchStandardSingleTokenScript(script)) {
+    if (IsOpenSearchStandardSingleTokenScript(script) ||
+        IsOpenSearchStandardEmoji(codepoint)) {
       flush_token();
       list.WriteElement().WriteStringRef(string_t(
           input_data + pos, UnsafeNumericCast<uint32_t>(char_size)));
-    } else if (IsOpenSearchStandardTokenChar(codepoint)) {
+    } else if (IsOpenSearchStandardIntraTokenPunctuation(codepoint) &&
+               token_size > 0) {
+      UChar32 next_codepoint = 0;
+      int next_char_size = 0;
+      UScriptCode next_script = USCRIPT_UNKNOWN;
+      auto next_pos = pos + UnsafeNumericCast<idx_t>(char_size);
+      if (decode_codepoint(next_pos, next_codepoint, next_char_size,
+                           next_script) &&
+          IsOpenSearchStandardContinuationChar(next_codepoint, next_script)) {
+        token_size += UnsafeNumericCast<idx_t>(char_size);
+      } else {
+        flush_token();
+      }
+    } else if (IsOpenSearchStandardTokenChar(codepoint, script)) {
       if (token_size == 0) {
         token_start = pos;
       }
