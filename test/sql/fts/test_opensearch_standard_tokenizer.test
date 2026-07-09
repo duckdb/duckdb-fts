@@ -1,0 +1,64 @@
+# name: test/sql/fts/test_opensearch_standard_tokenizer.test
+# description: Test OpenSearch standard-tokenizer parity for multilingual FTS tokenization.
+# group: [fts]
+
+require fts
+
+require no_alternative_verify
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(lower(strip_accents(
+        'תל-אביב ביב Привет-мир مرحبا-بالعالم 東京大学に行く 北京大学 한국어 테스트 café'
+    )))) AS token
+)
+----
+תל
+אביב
+ביב
+привет
+мир
+مرحبا
+بالعالم
+東
+京
+大
+学
+に
+行
+く
+北
+京
+大
+学
+한국어
+테스트
+cafe
+
+statement ok
+CREATE TABLE unicode_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO unicode_docs VALUES ('doc1', 'תל-אביב ביב Привет-мир مرحبا-بالعالم 東京大学に行く 北京大学 한국어 테스트 café')
+
+statement ok
+PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='opensearch_standard', stemmer='none', stopwords='none')
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term IN ('東京大学に行く', '北京大学')
+----
+0
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term IN ('東', '京', '大', '学', 'に', '行', 'く', '北', '한국어', '테스트')
+----
+10
+
+statement error
+PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='unknown', overwrite=true)
+----

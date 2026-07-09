@@ -20,6 +20,7 @@ The extension adds two `PRAGMA` statements to DuckDB: one to create, and one to 
 
 ```python
 create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
+                 tokenizer = 'regex',
                  stopwords = 'english',
                  ignore = "[0-9!@#$%^&*()_+={}\\[\\]:;<>,.?~\\\\/\\|''\"`-]+",
                  strip_accents = 1, lower = 1, overwrite = 0,
@@ -36,8 +37,9 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `input_id` | `VARCHAR` | Column name of document identifier, e.g., `'document_identifier'` |
 | `input_values…` | `VARCHAR` | Column names of the text fields to be indexed (vararg), e.g., `'text_field_1'`, `'text_field_2'`, ..., `'text_field_N'`, or `'\*'` for all columns in input_table of type `VARCHAR` |
 | `stemmer` | `VARCHAR` | The type of stemmer to be used. One of `'arabic'`, `'armenian'`, `'basque'`, `'catalan'`, `'czech'`, `'danish'`, `'dutch'`, `'dutch_porter'`, `'english'`, `'esperanto'`, `'estonian'`, `'finnish'`, `'french'`, `'german'`, `'greek'`, `'hindi'`, `'hungarian'`, `'indonesian'`, `'irish'`, `'italian'`, `'lithuanian'`, `'nepali'`, `'norwegian'`, `'persian'`, `'polish'`, `'porter'`, `'portuguese'`, `'romanian'`, `'russian'`, `'serbian'`, `'sesotho'`, `'spanish'`, `'swedish'`, `'tamil'`, `'turkish'`, `'yiddish'`, or `'none'` if no stemming is to be used. Defaults to `'porter'` |
+| `tokenizer` | `VARCHAR` | Tokenizer to use. `'regex'` keeps the legacy regex-split behavior. `'opensearch_standard'` uses an OpenSearch/Lucene standard-tokenizer compatibility mode that splits Han, Hiragana, and Katakana into single-character tokens while preserving word runs for scripts such as Hebrew, Cyrillic, Arabic, Latin, and Hangul. Defaults to `'regex'` |
 | `stopwords` | `VARCHAR` | Qualified name of table containing a single `VARCHAR` column containing the desired stopwords, or `'none'` if no stopwords are to be used. Defaults to `'english'` for a pre-defined list of 571 English stopwords |
-| `ignore` | `VARCHAR` | Regular expression of patterns to be ignored. Defaults to a punctuation and digit pattern |
+| `ignore` | `VARCHAR` | Regular expression of patterns to be ignored by the `'regex'` tokenizer. Defaults to a punctuation and digit pattern |
 | `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` |
 | `lower` | `BOOLEAN` | Whether to convert all text to lowercase. Defaults to `1` |
 | `overwrite` | `BOOLEAN` | Whether to overwrite an existing index on a table. Defaults to `0` |

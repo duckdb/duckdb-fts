@@ -187,14 +187,23 @@ static string StopwordsScript(const string &stopwords) {
   return "INSERT INTO %fts_schema%.stopwords SELECT * FROM " + stopwords + ";";
 }
 
-static string TokenizeMacroScript(const string &ignore, bool strip_accents,
-                                  bool lower) {
+static string NormalizeTokenInputExpression(bool strip_accents, bool lower) {
   string expr = "s::VARCHAR";
   if (strip_accents) {
     expr = "strip_accents(" + expr + ")";
   }
   if (lower) {
     expr = "lower(" + expr + ")";
+  }
+  return expr;
+}
+
+static string TokenizeMacroScript(const string &tokenizer, const string &ignore,
+                                  bool strip_accents, bool lower) {
+  auto expr = NormalizeTokenInputExpression(strip_accents, lower);
+  if (tokenizer == "opensearch_standard") {
+    expr = "fts_tokenize_opensearch_standard(" + expr + ")";
+    return "CREATE MACRO %fts_schema%.tokenize(s) AS " + expr + ";";
   }
   auto delimiter = "(" + ignore + ")|\\s+";
   expr = "string_split_regex(" + expr + ", $$" + delimiter + "$$)";
@@ -1389,16 +1398,16 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
                              const string &input_id,
                              const vector<string> &input_values,
                              const string &stemmer, const string &stopwords,
-                             const string &ignore, bool strip_accents,
-                             bool lower, bool incremental, bool cluster_terms,
-                             bool layered_search) {
+                             const string &tokenizer, const string &ignore,
+                             bool strip_accents, bool lower, bool incremental,
+                             bool cluster_terms, bool layered_search) {
   string result;
   if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
     result += DropFTSTriggersScript(qname);
   }
   result += SchemaSetupScript();
   result += StopwordsScript(stopwords);
-  result += TokenizeMacroScript(ignore, strip_accents, lower);
+  result += TokenizeMacroScript(tokenizer, ignore, strip_accents, lower);
   result += IndexTablesScript(input_id, input_values, stemmer, stopwords,
                               GetFTSBuildTermsTable(qname),
                               GetFTSBuildDictTable(qname), cluster_terms);
@@ -1473,6 +1482,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   };
 
   const string stemmer = get_string("stemmer", "porter");
+  const string tokenizer = get_string("tokenizer", "regex");
   const string stopwords = get_string("stopwords", "english");
   const string ignore =
       get_string("ignore", "[0-9!@#$%^&*()_+={}\\[\\]:;<>,.?~\\\\/\\|''\"`-]+");
@@ -1482,6 +1492,13 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   const bool incremental = get_bool("incremental", false);
   const bool layered_search = get_bool("layered_search", false);
   const bool cluster_terms = get_bool("cluster_terms", false) || layered_search;
+
+  if (tokenizer != "regex" && tokenizer != "opensearch_standard") {
+    throw InvalidInputException(
+        "Unrecognized tokenizer '%s'. Supported tokenizers are: ['regex', "
+        "'opensearch_standard']",
+        tokenizer);
+  }
 
   if (stopwords != "english" && stopwords != "none") {
     auto sw_qname = GetQualifiedName(context, stopwords);
@@ -1549,7 +1566,7 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
   }
 
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
-                        ignore, strip_accents, lower, incremental,
+                        tokenizer, ignore, strip_accents, lower, incremental,
                         cluster_terms, layered_search);
 }
 
