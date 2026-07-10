@@ -42,8 +42,7 @@ static bool IsOpenSearchStandardTokenChar(UChar32 codepoint,
   }
   return u_isalnum(codepoint) ||
          u_hasBinaryProperty(codepoint, UCHAR_ALPHABETIC) ||
-         script == USCRIPT_KATAKANA ||
-         IsJapaneseProlongedSoundMark(codepoint);
+         script == USCRIPT_KATAKANA || IsJapaneseProlongedSoundMark(codepoint);
 }
 
 static bool IsOpenSearchStandardContinuationChar(UChar32 codepoint,
@@ -75,8 +74,8 @@ static void TokenizeOpenSearchStandard(string_t input, LIST_WRITER &list) {
       return false;
     }
     char_size = 0;
-    codepoint =
-        Utf8Proc::UTF8ToCodepoint(input_data + pos, char_size, input_size - pos);
+    codepoint = Utf8Proc::UTF8ToCodepoint(input_data + pos, char_size,
+                                          input_size - pos);
     if (char_size <= 0) {
       return false;
     }
@@ -98,8 +97,8 @@ static void TokenizeOpenSearchStandard(string_t input, LIST_WRITER &list) {
     if (IsOpenSearchStandardSingleTokenScript(script) ||
         IsOpenSearchStandardEmoji(codepoint)) {
       flush_token();
-      list.WriteElement().WriteStringRef(string_t(
-          input_data + pos, UnsafeNumericCast<uint32_t>(char_size)));
+      list.WriteElement().WriteStringRef(
+          string_t(input_data + pos, UnsafeNumericCast<uint32_t>(char_size)));
     } else if (IsOpenSearchStandardIntraTokenPunctuation(codepoint) &&
                token_size > 0) {
       UChar32 next_codepoint = 0;
