@@ -1,0 +1,8 @@
+template benchmark/fts/layered_autocomplete/templates/layered_query.benchmark.in
+display_name=FTS layered fuzzy query (1M)
+rows=1000000
+query_string=northstarr
+enable_prefix=false
+enable_substring=false
+enable_fuzzy=true
+enable_short_fuzzy=true
