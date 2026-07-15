@@ -69,16 +69,22 @@ static vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
 static vector<string>
 GetFTSLayeredInsertTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
-  return {prefix + "15_term_stats", prefix + "16_term_stats_by_len",
-          prefix + "17_term_grams", prefix + "35_term_stats_df",
-          prefix + "36_term_stats_by_len_df"};
+  return {prefix + "15_term_stats",           prefix + "16_term_stats_by_len",
+          prefix + "17_term_grams",           prefix + "18_raw_dict",
+          prefix + "19_term_prefixes",        prefix + "35_term_stats_df",
+          prefix + "36_term_stats_by_len_df", prefix + "37_raw_dict_df"};
 }
 
 static vector<string>
 GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
-  return {prefix + "23_term_stats_df", prefix + "24_term_stats_by_len_df",
-          prefix + "25_term_grams_prune", prefix + "26_term_stats_by_len_prune",
+  return {prefix + "05_raw_dict_df",
+          prefix + "21_term_prefixes_prune",
+          prefix + "22_raw_dict_prune",
+          prefix + "23_term_stats_df",
+          prefix + "24_term_stats_by_len_df",
+          prefix + "25_term_grams_prune",
+          prefix + "26_term_stats_by_len_prune",
           prefix + "27_term_stats_prune"};
 }
 
@@ -104,6 +110,11 @@ static string GetFTSBuildDictTable(const QualifiedName &qname) {
   return SQLIdentifier::ToString("__fts_build_dict_" + GetFTSSchemaName(qname));
 }
 
+static string GetFTSBuildRawDictTable(const QualifiedName &qname) {
+  return SQLIdentifier::ToString("__fts_build_raw_dict_" +
+                                 GetFTSSchemaName(qname));
+}
+
 static string GetFTSTermStatsTermIndex(const QualifiedName &qname) {
   return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
                                  "_term_stats_term_idx");
@@ -112,6 +123,11 @@ static string GetFTSTermStatsTermIndex(const QualifiedName &qname) {
 static string GetFTSTermGramsGramIndex(const QualifiedName &qname) {
   return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
                                  "_term_grams_gram_idx");
+}
+
+static string GetFTSTermPrefixesPrefixIndex(const QualifiedName &qname) {
+  return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
+                                 "_term_prefixes_prefix_idx");
 }
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
@@ -206,7 +222,8 @@ static string IndexTablesScript(const string &input_id,
                                 const string &stemmer, const string &stopwords,
                                 const string &build_terms_table,
                                 const string &build_dict_table,
-                                bool cluster_terms) {
+                                const string &build_raw_dict_table,
+                                bool cluster_terms, bool layered_search) {
   // clang-format off
 	string result = R"(
         CREATE TABLE %fts_schema%.fields (fieldid BIGINT, field VARCHAR);
@@ -214,6 +231,7 @@ static string IndexTablesScript(const string &input_id,
 
         DROP TABLE IF EXISTS temp.%build_terms_table%;
         DROP TABLE IF EXISTS temp.%build_dict_table%;
+        DROP TABLE IF EXISTS temp.%build_raw_dict_table%;
 
         CREATE TEMP TABLE %build_terms_table% AS
         WITH tokenized AS (
@@ -221,6 +239,7 @@ static string IndexTablesScript(const string &input_id,
         ),
         stemmed_stopped AS (
             SELECT %term_expression% AS term,
+                   %raw_term_select%
                    t.docid AS docid,
                    t.fieldid AS fieldid
             FROM tokenized AS t
@@ -229,6 +248,7 @@ static string IndexTablesScript(const string &input_id,
               %stopwords_filter%
         )
         SELECT ss.term,
+               %raw_term_output%
                ss.docid,
                ss.fieldid
         FROM stemmed_stopped AS ss;
@@ -264,13 +284,17 @@ static string IndexTablesScript(const string &input_id,
                term
         FROM numbered_terms;
 
+        %build_raw_dict%
+
         CREATE TABLE %fts_schema%.terms AS
         SELECT build_dict.termid,
+               %rawtermid_select%
                build_terms.docid,
                build_terms.fieldid
         FROM temp.%build_terms_table% AS build_terms
         JOIN temp.%build_dict_table% AS build_dict
           ON build_dict.term = build_terms.term
+        %raw_dict_join%
         %terms_order_by%;
 
         CREATE TABLE %fts_schema%.dict AS
@@ -288,8 +312,11 @@ static string IndexTablesScript(const string &input_id,
           ON document_frequencies.termid = build_dict.termid
         ORDER BY build_dict.termid;
 
+        %raw_dict_table%
+
         DROP TABLE temp.%build_terms_table%;
         DROP TABLE temp.%build_dict_table%;
+        DROP TABLE IF EXISTS temp.%build_raw_dict_table%;
 
         CREATE TABLE %fts_schema%.stats AS (
             SELECT COUNT(docs.docid) AS num_docs,
@@ -327,11 +354,79 @@ static string IndexTablesScript(const string &input_id,
   result =
       StringUtil::Replace(result, "%build_terms_table%", build_terms_table);
   result = StringUtil::Replace(result, "%build_dict_table%", build_dict_table);
+  result = StringUtil::Replace(result, "%build_raw_dict_table%",
+                               build_raw_dict_table);
+  string build_raw_dict;
+  string raw_dict_table;
+  if (layered_search) {
+    build_raw_dict = R"(
+        CREATE TEMP TABLE %build_raw_dict_table% AS
+        WITH grouped_raw_terms AS (
+            SELECT raw_term,
+                   term,
+                   min(docid) AS first_docid
+            FROM temp.%build_terms_table%
+            GROUP BY raw_term,
+                     term
+        )
+        SELECT row_number() OVER (
+                   ORDER BY grouped_raw_terms.first_docid,
+                            grouped_raw_terms.raw_term,
+                            grouped_raw_terms.term
+               ) - 1 AS rawtermid,
+               grouped_raw_terms.raw_term,
+               build_dict.termid
+        FROM grouped_raw_terms
+        JOIN temp.%build_dict_table% AS build_dict
+          ON build_dict.term = grouped_raw_terms.term;
+    )";
+    raw_dict_table = R"(
+        CREATE TABLE %fts_schema%.raw_dict AS
+        WITH document_frequencies AS (
+            SELECT rawtermid,
+                   count(DISTINCT docid)::BIGINT AS df
+            FROM %fts_schema%.terms
+            GROUP BY rawtermid
+        )
+        SELECT build_raw_dict.rawtermid,
+               build_raw_dict.raw_term,
+               build_raw_dict.termid,
+               document_frequencies.df
+        FROM temp.%build_raw_dict_table% AS build_raw_dict
+        JOIN document_frequencies
+          ON document_frequencies.rawtermid = build_raw_dict.rawtermid
+        ORDER BY build_raw_dict.rawtermid;
+    )";
+  }
+  result = StringUtil::Replace(result, "%build_raw_dict%", build_raw_dict);
+  result = StringUtil::Replace(result, "%raw_dict_table%", raw_dict_table);
+  result = StringUtil::Replace(result, "%raw_term_select%",
+                               layered_search ? "t.w AS raw_term," : "");
+  result = StringUtil::Replace(result, "%raw_term_output%",
+                               layered_search ? "ss.raw_term," : "");
+  result =
+      StringUtil::Replace(result, "%rawtermid_select%",
+                          layered_search ? "build_raw_dict.rawtermid," : "");
+  result = StringUtil::Replace(
+      result, "%raw_dict_join%",
+      layered_search ? "JOIN temp.%build_raw_dict_table% AS build_raw_dict ON "
+                       "build_raw_dict.raw_term = build_terms.raw_term AND "
+                       "build_raw_dict.termid = build_dict.termid"
+                     : "");
+  result =
+      StringUtil::Replace(result, "%build_terms_table%", build_terms_table);
+  result = StringUtil::Replace(result, "%build_dict_table%", build_dict_table);
+  result = StringUtil::Replace(result, "%build_raw_dict_table%",
+                               build_raw_dict_table);
   result = StringUtil::Replace(
       result, "%terms_order_by%",
-      cluster_terms ? "ORDER BY build_dict.termid, build_terms.fieldid, "
-                      "build_terms.docid"
-                    : "");
+      cluster_terms
+          ? (layered_search
+                 ? "ORDER BY build_dict.termid, build_raw_dict.rawtermid, "
+                   "build_terms.fieldid, build_terms.docid"
+                 : "ORDER BY build_dict.termid, build_terms.fieldid, "
+                   "build_terms.docid")
+          : "");
   result = StringUtil::Replace(result, "%term_expression%", term_expression);
   result = StringUtil::Replace(result, "%stopwords_filter%", stopwords_filter);
   result = StringUtil::Replace(result, "%field_values%",
@@ -377,12 +472,26 @@ static string LayeredSidecarScript(const QualifiedName &qname) {
         ORDER BY gram,
                  termid;
 
+        CREATE TABLE %fts_schema%.term_prefixes AS
+        SELECT prefix_len,
+               substr(raw_dict.raw_term, 1, prefix_len) AS prefix,
+               raw_dict.rawtermid
+        FROM %fts_schema%.raw_dict AS raw_dict,
+             (VALUES (2::UTINYINT), (3::UTINYINT)) AS prefix_lengths(prefix_len)
+        WHERE length(raw_dict.raw_term) >= prefix_len
+        ORDER BY prefix_len,
+                 prefix,
+                 raw_dict.rawtermid;
+
         CREATE INDEX %term_stats_term_index% ON %fts_schema%.term_stats(term);
         CREATE INDEX %term_grams_gram_index% ON %fts_schema%.term_grams(gram);
+        CREATE INDEX %term_prefixes_prefix_index% ON %fts_schema%.term_prefixes(prefix_len, prefix);
 
         ANALYZE %fts_schema%.term_stats;
         ANALYZE %fts_schema%.term_stats_by_len;
         ANALYZE %fts_schema%.term_grams;
+        ANALYZE %fts_schema%.raw_dict;
+        ANALYZE %fts_schema%.term_prefixes;
     )";
   // clang-format on
 
@@ -390,6 +499,8 @@ static string LayeredSidecarScript(const QualifiedName &qname) {
                                GetFTSTermStatsTermIndex(qname));
   result = StringUtil::Replace(result, "%term_grams_gram_index%",
                                GetFTSTermGramsGramIndex(qname));
+  result = StringUtil::Replace(result, "%term_prefixes_prefix_index%",
+                               GetFTSTermPrefixesPrefixIndex(qname));
   return result;
 }
 
@@ -488,8 +599,8 @@ static string MatchMacroScript() {
 static string LayeredSearchTableMacroScript() {
   // clang-format off
 	return R"(
-        CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false) AS TABLE
-            WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, enable_fuzzy, enable_short_fuzzy, expand_exact_terms) AS (
+        CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard') AS TABLE
+            WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, enable_fuzzy, enable_short_fuzzy, expand_exact_terms, query_mode) AS (
                 SELECT term_limit::BIGINT,
                        max_df_ratio::DOUBLE,
                        max_df::BIGINT,
@@ -497,27 +608,56 @@ static string LayeredSearchTableMacroScript() {
                        enable_substring::BOOLEAN,
                        enable_fuzzy::BOOLEAN,
                        enable_short_fuzzy::BOOLEAN,
-                       expand_exact_terms::BOOLEAN
+                       expand_exact_terms::BOOLEAN,
+                       CASE lower(query_mode::VARCHAR)
+                           WHEN 'standard' THEN 'standard'
+                           WHEN 'autocomplete' THEN 'autocomplete'
+                           ELSE error('query_mode must be either standard or autocomplete')
+                       END
             ),
             df_cap(max_df) AS (
                 SELECT least(params.max_df, ceil(stats.num_docs * params.max_df_ratio)::BIGINT)
                 FROM %fts_schema%.stats AS stats
                 CROSS JOIN params
             ),
-            raw_tokens AS (
-                SELECT DISTINCT raw_token
+            tokenized_query AS (
+                SELECT unnest(tokens) AS raw_token,
+                       generate_subscripts(tokens, 1) AS token_position
                 FROM (
-                    SELECT unnest(%fts_schema%.tokenize(query_string)) AS raw_token
-                ) AS tokenized_query
+                    SELECT %fts_schema%.tokenize(query_string) AS tokens
+                ) AS query_token_list
+            ),
+            raw_tokens AS (
+                SELECT raw_token,
+                       token_position,
+                       max(token_position) OVER () AS final_position
+                FROM tokenized_query
                 WHERE raw_token IS NOT NULL
                   AND raw_token <> ''
                   AND raw_token NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+            ),
+            autocomplete_final_token AS (
+                SELECT raw_token AS query_term,
+                       length(raw_token)::BIGINT AS query_len,
+                       least(length(raw_token), 3)::UTINYINT AS prefix_len,
+                       substr(raw_token, 1, least(length(raw_token), 3)) AS prefix
+                FROM raw_tokens
+                CROSS JOIN params
+                WHERE params.query_mode = 'autocomplete'
+                  AND token_position = final_position
+                  AND length(raw_token) >= 2
             ),
             stemmed_tokens AS (
                 SELECT DISTINCT query_term
                 FROM (
                     SELECT stem(raw_token, '%stemmer%') AS query_term
                     FROM raw_tokens
+                    CROSS JOIN params
+                    WHERE params.query_mode = 'standard'
+                       OR (
+                           token_position < final_position
+                           AND EXISTS (SELECT 1 FROM autocomplete_final_token)
+                       )
                 ) AS stemmed_query
                 WHERE query_term IS NOT NULL
                   AND query_term <> ''
@@ -532,6 +672,7 @@ static string LayeredSearchTableMacroScript() {
             exact_terms AS (
                 SELECT query_tokens.query_term,
                        term_stats.termid,
+                       NULL::BIGINT AS rawtermid,
                        term_stats.term,
                        term_stats.df,
                        1.0::DOUBLE AS expansion_weight,
@@ -546,8 +687,11 @@ static string LayeredSearchTableMacroScript() {
                 LEFT JOIN exact_terms
                   ON exact_terms.query_term = query_tokens.query_term
                 CROSS JOIN params
-                WHERE params.expand_exact_terms
-                   OR exact_terms.termid IS NULL
+                WHERE params.query_mode = 'standard'
+                  AND (
+                      params.expand_exact_terms
+                      OR exact_terms.termid IS NULL
+                  )
             ),
             query_grams AS (
                 SELECT query_term,
@@ -574,6 +718,7 @@ static string LayeredSearchTableMacroScript() {
             gram_expansions AS (
                 SELECT gram_candidates.query_term,
                        term_stats.termid,
+                       NULL::BIGINT AS rawtermid,
                        term_stats.term,
                        term_stats.df,
                        CASE
@@ -644,6 +789,7 @@ static string LayeredSearchTableMacroScript() {
             short_fuzzy_expansions AS (
                 SELECT expansion_tokens.query_term,
                        term_stats.termid,
+                       NULL::BIGINT AS rawtermid,
                        term_stats.term,
                        term_stats.df,
                        greatest(
@@ -678,6 +824,7 @@ static string LayeredSearchTableMacroScript() {
             deduped_expansions AS (
                 SELECT query_term,
                        termid,
+                       rawtermid,
                        term,
                        df,
                        expansion_weight,
@@ -686,7 +833,8 @@ static string LayeredSearchTableMacroScript() {
                     SELECT *,
                            row_number() OVER (
                                PARTITION BY query_term,
-                                            termid
+                                            termid,
+                                            rawtermid
                                ORDER BY expansion_weight DESC,
                                         df ASC,
                                         length(term) ASC,
@@ -710,10 +858,62 @@ static string LayeredSearchTableMacroScript() {
                        ) AS expansion_rank
                 FROM deduped_expansions
             ),
+            autocomplete_candidates AS (
+                SELECT final_token.query_term,
+                       raw_dict.termid,
+                       raw_dict.rawtermid,
+                       raw_dict.raw_term AS term,
+                       raw_dict.df,
+                       CASE
+                           WHEN raw_dict.raw_term = final_token.query_term THEN 1.0::DOUBLE
+                           ELSE 0.85::DOUBLE
+                       END AS expansion_weight,
+                       CASE
+                           WHEN raw_dict.raw_term = final_token.query_term THEN 'exact'
+                           ELSE 'prefix'
+                       END AS match_type
+                FROM autocomplete_final_token AS final_token
+                JOIN %fts_schema%.term_prefixes AS term_prefixes
+                  ON term_prefixes.prefix_len = final_token.prefix_len
+                 AND term_prefixes.prefix = final_token.prefix
+                JOIN %fts_schema%.raw_dict AS raw_dict
+                  ON raw_dict.rawtermid = term_prefixes.rawtermid
+                CROSS JOIN df_cap
+                WHERE starts_with(raw_dict.raw_term, final_token.query_term)
+                  AND (
+                      raw_dict.raw_term = final_token.query_term
+                      OR raw_dict.df <= df_cap.max_df
+                  )
+            ),
+            autocomplete_exact_terms AS (
+                SELECT *
+                FROM autocomplete_candidates
+                WHERE term = query_term
+            ),
+            autocomplete_prefix_terms AS (
+                SELECT query_term,
+                       termid,
+                       rawtermid,
+                       term,
+                       df,
+                       expansion_weight,
+                       match_type,
+                       row_number() OVER (
+                           PARTITION BY query_term
+                           ORDER BY df ASC,
+                                    length(term) ASC,
+                                    term ASC,
+                                    rawtermid ASC
+                       ) AS expansion_rank
+                FROM autocomplete_candidates
+                WHERE term <> query_term
+            ),
             selected_terms AS (
                 SELECT query_term,
                        termid,
+                       rawtermid,
                        any_value(term) AS term,
+                       any_value(df) AS df,
                        any_value(match_type) AS match_type,
                        max(expansion_weight) AS expansion_weight
                 FROM (
@@ -722,6 +922,7 @@ static string LayeredSearchTableMacroScript() {
                     UNION ALL
                     SELECT query_term,
                            termid,
+                           rawtermid,
                            term,
                            df,
                            expansion_weight,
@@ -729,9 +930,24 @@ static string LayeredSearchTableMacroScript() {
                     FROM limited_expansions
                     CROSS JOIN params
                     WHERE expansion_rank <= params.term_limit
+                    UNION ALL
+                    SELECT *
+                    FROM autocomplete_exact_terms
+                    UNION ALL
+                    SELECT query_term,
+                           termid,
+                           rawtermid,
+                           term,
+                           df,
+                           expansion_weight,
+                           match_type
+                    FROM autocomplete_prefix_terms
+                    CROSS JOIN params
+                    WHERE expansion_rank <= params.term_limit
                 ) AS terms
                 GROUP BY query_term,
-                         termid
+                         termid,
+                         rawtermid
             ),
             fieldids AS (
                 SELECT fts_fields.fieldid
@@ -746,21 +962,29 @@ static string LayeredSearchTableMacroScript() {
             ),
             term_tf AS (
                 SELECT selected_terms.termid,
+                       selected_terms.rawtermid,
                        terms.docid,
+                       selected_terms.df,
                        max(selected_terms.expansion_weight) AS expansion_weight,
                        count(*) AS tf
                 FROM selected_terms
                 JOIN %fts_schema%.terms AS terms
                   ON terms.termid = selected_terms.termid
+                 AND (
+                     selected_terms.rawtermid IS NULL
+                     OR terms.rawtermid = selected_terms.rawtermid
+                 )
                 WHERE terms.fieldid IN (SELECT fieldid FROM fieldids)
                 GROUP BY selected_terms.termid,
-                         terms.docid
+                         selected_terms.rawtermid,
+                         terms.docid,
+                         selected_terms.df
             ),
             scores AS (
                 SELECT docs.name AS docname,
                        sum(
                            term_tf.expansion_weight
-                           * log(((((stats.num_docs - dict.df) + 0.5) / (dict.df + 0.5)) + 1))
+                           * log(((((stats.num_docs - term_tf.df) + 0.5) / (term_tf.df + 0.5)) + 1))
                            * (
                                (term_tf.tf * (k + 1))
                                / (
@@ -775,8 +999,6 @@ static string LayeredSearchTableMacroScript() {
                 FROM term_tf
                 JOIN %fts_schema%.docs AS docs
                   ON docs.docid = term_tf.docid
-                JOIN %fts_schema%.dict AS dict
-                  ON dict.termid = term_tf.termid
                 CROSS JOIN %fts_schema%.stats AS stats
                 GROUP BY docs.name
             ),
@@ -800,7 +1022,7 @@ static string LayeredSearchTableMacroScript() {
 static string LayeredMatchMacroScript() {
   // clang-format off
 	return R"(
-        CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false) AS (
+        CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard') AS (
             SELECT score
             FROM %fts_schema%.search_layered_bm25(
                 query_string,
@@ -815,7 +1037,8 @@ static string LayeredMatchMacroScript() {
                 enable_substring := enable_substring,
                 enable_fuzzy := enable_fuzzy,
                 enable_short_fuzzy := enable_short_fuzzy,
-                expand_exact_terms := expand_exact_terms
+                expand_exact_terms := expand_exact_terms,
+                query_mode := query_mode
             ) AS hits
             WHERE hits.docname = input_id
         );
@@ -944,6 +1167,63 @@ static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname,
             )
             ORDER BY grams.gram,
                      grams.termid;
+
+        CREATE TRIGGER %trigger_18_raw_dict% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.raw_dict (rawtermid, raw_term, termid, df)
+            %token_ctes%,
+            new_raw_terms AS (
+                SELECT DISTINCT ss.raw_term,
+                       d.termid
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON d.term = ss.term
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM %fts_schema%.raw_dict AS rd
+                    WHERE rd.raw_term = ss.raw_term
+                      AND rd.termid = d.termid
+                )
+                ORDER BY ss.raw_term,
+                         d.termid
+            )
+            SELECT (SELECT COALESCE(max(rawtermid) + 1, 0) FROM %fts_schema%.raw_dict)
+                       + row_number() OVER () - 1 AS rawtermid,
+                   new_raw_terms.raw_term,
+                   new_raw_terms.termid,
+                   0 AS df
+            FROM new_raw_terms;
+
+        CREATE TRIGGER %trigger_19_term_prefixes% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.term_prefixes (prefix_len, prefix, rawtermid)
+            %token_ctes%,
+            affected_raw_terms AS (
+                SELECT DISTINCT rd.rawtermid,
+                       rd.raw_term
+                FROM stemmed_stopped AS ss
+                JOIN %fts_schema%.dict AS d ON d.term = ss.term
+                JOIN %fts_schema%.raw_dict AS rd
+                  ON rd.raw_term = ss.raw_term
+                 AND rd.termid = d.termid
+            )
+            SELECT prefix_lengths.prefix_len,
+                   substr(affected_raw_terms.raw_term, 1, prefix_lengths.prefix_len) AS prefix,
+                   affected_raw_terms.rawtermid
+            FROM affected_raw_terms,
+                 (VALUES (2::UTINYINT), (3::UTINYINT)) AS prefix_lengths(prefix_len)
+            WHERE length(affected_raw_terms.raw_term) >= prefix_lengths.prefix_len
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM %fts_schema%.term_prefixes AS tp
+                  WHERE tp.prefix_len = prefix_lengths.prefix_len
+                    AND tp.prefix = substr(affected_raw_terms.raw_term, 1, prefix_lengths.prefix_len)
+                    AND tp.rawtermid = affected_raw_terms.rawtermid
+              )
+            ORDER BY prefix_lengths.prefix_len,
+                     prefix,
+                     affected_raw_terms.rawtermid;
     )";
   // clang-format on
 
@@ -954,6 +1234,10 @@ static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname,
                                SQLIdentifier::ToString(trigger_names[1]));
   result = StringUtil::Replace(result, "%trigger_17_term_grams%",
                                SQLIdentifier::ToString(trigger_names[2]));
+  result = StringUtil::Replace(result, "%trigger_18_raw_dict%",
+                               SQLIdentifier::ToString(trigger_names[3]));
+  result = StringUtil::Replace(result, "%trigger_19_term_prefixes%",
+                               SQLIdentifier::ToString(trigger_names[4]));
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
   result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
@@ -961,7 +1245,8 @@ static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname,
 }
 
 static string LayeredInsertDFTriggerScript(const QualifiedName &qname,
-                                           const string &token_ctes) {
+                                           const string &token_ctes,
+                                           const string &input_id) {
   // clang-format off
 	string result = R"(
         CREATE TRIGGER %trigger_35_term_stats_df% AFTER INSERT ON %input_table%
@@ -985,18 +1270,68 @@ static string LayeredInsertDFTriggerScript(const QualifiedName &qname,
               AND ts.termid IN (
                   %affected_termids%
               );
+
+        CREATE TRIGGER %trigger_37_raw_dict_df% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.raw_dict AS rd
+            SET df = rd.df + inserted_df.df
+            FROM (
+                SELECT t.rawtermid,
+                       count(DISTINCT t.docid)::BIGINT AS df
+                FROM %fts_schema%.terms AS t
+                JOIN %fts_schema%.docs AS docs ON docs.docid = t.docid
+                JOIN fts_new_rows AS new_rows ON new_rows.%input_id% = docs.name
+                GROUP BY t.rawtermid
+            ) AS inserted_df
+            WHERE rd.rawtermid = inserted_df.rawtermid;
     )";
   // clang-format on
 
   auto affected_termids = LayeredAffectedTermIdsSubquery(token_ctes);
   auto trigger_names = GetFTSLayeredInsertTriggerNames(qname);
   result = StringUtil::Replace(result, "%trigger_35_term_stats_df%",
-                               SQLIdentifier::ToString(trigger_names[3]));
+                               SQLIdentifier::ToString(trigger_names[5]));
   result = StringUtil::Replace(result, "%trigger_36_term_stats_by_len_df%",
-                               SQLIdentifier::ToString(trigger_names[4]));
+                               SQLIdentifier::ToString(trigger_names[6]));
+  result = StringUtil::Replace(result, "%trigger_37_raw_dict_df%",
+                               SQLIdentifier::ToString(trigger_names[7]));
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
   result = StringUtil::Replace(result, "%affected_termids%", affected_termids);
+  return result;
+}
+
+static string LayeredDeleteBeforeTermsTriggerScript(const QualifiedName &qname,
+                                                    const string &input_id) {
+  // clang-format off
+	string result = R"(
+        CREATE TRIGGER %trigger_05_raw_dict_df% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.raw_dict AS rd
+            SET df = rd.df - deleted_df.df
+            FROM (
+                SELECT t.rawtermid,
+                       count(DISTINCT t.docid)::BIGINT AS df
+                FROM %fts_schema%.terms AS t
+                JOIN %fts_schema%.docs AS docs ON docs.docid = t.docid
+                JOIN fts_old_rows AS old_rows ON old_rows.%input_id% = docs.name
+                GROUP BY t.rawtermid
+            ) AS deleted_df
+            WHERE rd.rawtermid = deleted_df.rawtermid;
+    )";
+  // clang-format on
+
+  auto trigger_names = GetFTSLayeredDeleteTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_05_raw_dict_df%",
+                               SQLIdentifier::ToString(trigger_names[0]));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
   return result;
 }
 
@@ -1004,6 +1339,22 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname,
                                                 const string &token_ctes) {
   // clang-format off
 	string result = R"(
+        CREATE TRIGGER %trigger_21_term_prefixes_prune% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.term_prefixes
+            WHERE rawtermid IN (
+                SELECT rd.rawtermid
+                FROM %fts_schema%.raw_dict AS rd
+                WHERE rd.df = 0
+            );
+
+        CREATE TRIGGER %trigger_22_raw_dict_prune% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.raw_dict
+            WHERE df = 0;
+
         CREATE TRIGGER %trigger_23_term_stats_df% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
         FOR EACH STATEMENT
@@ -1069,16 +1420,20 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname,
 
   auto affected_termids = LayeredAffectedTermIdsSubquery(token_ctes);
   auto trigger_names = GetFTSLayeredDeleteTriggerNames(qname);
-  result = StringUtil::Replace(result, "%trigger_23_term_stats_df%",
-                               SQLIdentifier::ToString(trigger_names[0]));
-  result = StringUtil::Replace(result, "%trigger_24_term_stats_by_len_df%",
+  result = StringUtil::Replace(result, "%trigger_21_term_prefixes_prune%",
                                SQLIdentifier::ToString(trigger_names[1]));
-  result = StringUtil::Replace(result, "%trigger_25_term_grams_prune%",
+  result = StringUtil::Replace(result, "%trigger_22_raw_dict_prune%",
                                SQLIdentifier::ToString(trigger_names[2]));
-  result = StringUtil::Replace(result, "%trigger_26_term_stats_by_len_prune%",
+  result = StringUtil::Replace(result, "%trigger_23_term_stats_df%",
                                SQLIdentifier::ToString(trigger_names[3]));
-  result = StringUtil::Replace(result, "%trigger_27_term_stats_prune%",
+  result = StringUtil::Replace(result, "%trigger_24_term_stats_by_len_df%",
                                SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(result, "%trigger_25_term_grams_prune%",
+                               SQLIdentifier::ToString(trigger_names[5]));
+  result = StringUtil::Replace(result, "%trigger_26_term_stats_by_len_prune%",
+                               SQLIdentifier::ToString(trigger_names[6]));
+  result = StringUtil::Replace(result, "%trigger_27_term_stats_prune%",
+                               SQLIdentifier::ToString(trigger_names[7]));
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
   result = StringUtil::Replace(result, "%affected_termids%", affected_termids);
@@ -1123,7 +1478,8 @@ static string InsertTriggerScript(const QualifiedName &qname,
             %union_fields_query%
         ),
         stemmed_stopped AS (
-            SELECT stem(t.w, '%stemmer%') AS term,
+            SELECT t.w AS raw_term,
+                   stem(t.w, '%stemmer%') AS term,
                    t.docid AS docid,
                    t.fieldid AS fieldid
             FROM tokenized AS t
@@ -1183,13 +1539,15 @@ static string InsertTriggerScript(const QualifiedName &qname,
         CREATE TRIGGER %trigger_20_terms% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
-            INSERT INTO %fts_schema%.terms (docid, fieldid, termid)
+            INSERT INTO %fts_schema%.terms (%terms_insert_columns%)
             %token_ctes%
             SELECT ss.docid,
                    ss.fieldid,
                    d.termid
+                   %rawtermid_select%
             FROM stemmed_stopped AS ss
             JOIN %fts_schema%.dict AS d ON ss.term = d.term
+            %raw_dict_join%
             %insert_terms_order_by%;
 
         CREATE TRIGGER %trigger_30_dict_df% AFTER INSERT ON %input_table%
@@ -1254,10 +1612,23 @@ static string InsertTriggerScript(const QualifiedName &qname,
                      : "");
   result = StringUtil::Replace(
       result, "%layered_insert_df_triggers%",
-      layered_search ? LayeredInsertDFTriggerScript(qname, token_ctes) : "");
+      layered_search ? LayeredInsertDFTriggerScript(qname, token_ctes, input_id)
+                     : "");
   result = StringUtil::Replace(
       result, "%insert_terms_order_by%",
-      layered_search ? "ORDER BY d.termid, ss.fieldid, ss.docid" : "");
+      layered_search ? "ORDER BY d.termid, rd.rawtermid, ss.fieldid, ss.docid"
+                     : "");
+  result =
+      StringUtil::Replace(result, "%terms_insert_columns%",
+                          layered_search ? "docid, fieldid, termid, rawtermid"
+                                         : "docid, fieldid, termid");
+  result = StringUtil::Replace(result, "%rawtermid_select%",
+                               layered_search ? ", rd.rawtermid" : "");
+  result = StringUtil::Replace(
+      result, "%raw_dict_join%",
+      layered_search ? "JOIN %fts_schema%.raw_dict AS rd ON rd.raw_term = "
+                       "ss.raw_term AND rd.termid = d.termid"
+                     : "");
 
   auto trigger_names = GetFTSInsertTriggerNames(qname);
   result = StringUtil::Replace(result, "%trigger_00_docs%",
@@ -1292,7 +1663,8 @@ static string DeleteTriggerScript(const QualifiedName &qname,
             %union_fields_query%
         ),
         stemmed_stopped AS (
-            SELECT stem(t.w, '%stemmer%') AS term
+            SELECT t.w AS raw_term,
+                   stem(t.w, '%stemmer%') AS term
             FROM tokenized AS t
             WHERE t.w NOT NULL
               AND t.w <> ''
@@ -1315,6 +1687,8 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                 GROUP BY t.termid
             ) AS deleted_df_delta
             WHERE d.termid = deleted_df_delta.termid;
+
+        %layered_delete_before_terms_triggers%
 
         CREATE TRIGGER %trigger_10_terms% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
@@ -1371,6 +1745,10 @@ static string DeleteTriggerScript(const QualifiedName &qname,
   result = StringUtil::Replace(result, "%trigger_40_stats%",
                                SQLIdentifier::ToString(trigger_names[4]));
   result = StringUtil::Replace(
+      result, "%layered_delete_before_terms_triggers%",
+      layered_search ? LayeredDeleteBeforeTermsTriggerScript(qname, input_id)
+                     : "");
+  result = StringUtil::Replace(
       result, "%layered_delete_after_df_triggers%",
       layered_search ? LayeredDeleteAfterDFTriggerScript(qname, token_ctes)
                      : "");
@@ -1399,9 +1777,10 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   result += SchemaSetupScript();
   result += StopwordsScript(stopwords);
   result += TokenizeMacroScript(ignore, strip_accents, lower);
-  result += IndexTablesScript(input_id, input_values, stemmer, stopwords,
-                              GetFTSBuildTermsTable(qname),
-                              GetFTSBuildDictTable(qname), cluster_terms);
+  result += IndexTablesScript(
+      input_id, input_values, stemmer, stopwords, GetFTSBuildTermsTable(qname),
+      GetFTSBuildDictTable(qname), GetFTSBuildRawDictTable(qname),
+      cluster_terms, layered_search);
   result += MatchMacroScript();
   if (layered_search) {
     result += LayeredSidecarScript(qname);

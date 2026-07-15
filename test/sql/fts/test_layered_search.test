@@ -393,3 +393,139 @@ FROM fts_main_documents.search_layered_bm25('mark', fields := ' author ', enable
 ----
 doc2
 doc4
+
+statement ok
+CREATE TABLE autocomplete_docs(id VARCHAR NOT NULL, body VARCHAR, title VARCHAR)
+
+statement ok
+INSERT INTO autocomplete_docs VALUES
+    ('doc1', 'running', 'alpha'),
+    ('doc2', 'runner', 'beta'),
+    ('doc3', 'runs', 'alpha'),
+    ('doc4', 'run', 'gamma')
+
+statement ok
+PRAGMA create_fts_index('autocomplete_docs', 'id', 'body', 'title', stemmer='porter', stopwords='none', layered_search=true, incremental=true)
+
+query I
+SELECT count(*) <= 2 * (SELECT count(*) FROM fts_main_autocomplete_docs.raw_dict)
+FROM fts_main_autocomplete_docs.term_prefixes
+----
+true
+
+query I rowsort
+SELECT docname
+FROM fts_main_autocomplete_docs.search_layered_bm25(
+    'runn',
+    fields := 'body',
+    query_mode := 'autocomplete'
+)
+----
+doc1
+doc2
+
+query I rowsort
+SELECT docname
+FROM fts_main_autocomplete_docs.search_layered_bm25(
+    'ru',
+    fields := 'body',
+    query_mode := 'autocomplete'
+)
+----
+doc1
+doc2
+doc3
+doc4
+
+query I
+SELECT count(*)
+FROM fts_main_autocomplete_docs.search_layered_bm25(
+    'r',
+    query_mode := 'autocomplete'
+)
+----
+0
+
+query I rowsort
+SELECT docname
+FROM fts_main_autocomplete_docs.search_layered_bm25(
+    'al',
+    fields := 'title',
+    max_df_ratio := 1.0,
+    query_mode := 'autocomplete'
+)
+----
+doc1
+doc3
+
+query I rowsort
+SELECT id
+FROM (
+    SELECT id,
+           fts_main_autocomplete_docs.match_layered_bm25(
+               id,
+               'runn',
+               fields := 'body',
+               query_mode := 'autocomplete'
+           ) AS score
+    FROM autocomplete_docs
+) AS scored
+WHERE score IS NOT NULL
+----
+doc1
+doc2
+
+statement error
+SELECT *
+FROM fts_main_autocomplete_docs.search_layered_bm25('run', query_mode := 'invalid')
+----
+
+statement ok
+INSERT INTO autocomplete_docs VALUES ('doc5', 'runnable', 'delta')
+
+query I
+SELECT df
+FROM fts_main_autocomplete_docs.raw_dict
+WHERE raw_term = 'runnable'
+----
+1
+
+query I rowsort
+SELECT docname
+FROM fts_main_autocomplete_docs.search_layered_bm25(
+    'runn',
+    fields := 'body',
+    query_mode := 'autocomplete'
+)
+----
+doc1
+doc2
+doc5
+
+statement ok
+DELETE FROM autocomplete_docs WHERE id IN ('doc1', 'doc5')
+
+query I
+SELECT count(*)
+FROM fts_main_autocomplete_docs.raw_dict
+WHERE raw_term IN ('running', 'runnable')
+----
+0
+
+query I
+SELECT count(*)
+FROM fts_main_autocomplete_docs.term_prefixes AS tp
+LEFT JOIN fts_main_autocomplete_docs.raw_dict AS rd USING (rawtermid)
+WHERE rd.rawtermid IS NULL
+----
+0
+
+query I
+SELECT docname
+FROM fts_main_autocomplete_docs.search_layered_bm25(
+    'runn',
+    fields := 'body',
+    query_mode := 'autocomplete'
+)
+----
+doc2

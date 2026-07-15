@@ -1,0 +1,204 @@
+name: FTS Regression
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        type: string
+        default: ''
+      base_hash:
+        type: string
+        default: ''
+      run_haystack:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: Git ref to benchmark
+        type: string
+        default: ''
+      base_hash:
+        description: Optional base commit to compare against
+        type: string
+        default: ''
+      run_haystack:
+        description: Run the one-million-document benchmark set
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 3 * * 0'
+
+concurrency:
+  group: fts-regression-${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GIT_REF: ${{ inputs.git_ref != '' && inputs.git_ref || github.sha }}
+  BASE_HASH: ${{ inputs.base_hash }}
+  RUN_HAYSTACK: ${{ inputs.run_haystack || github.event_name == 'schedule' }}
+
+jobs:
+  build-runners:
+    name: Build base and current runners
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.GIT_REF }}
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ccache ninja-build
+
+      - name: Build current benchmark runner
+        env:
+          BUILD_BENCHMARK: 1
+          DISABLE_SANITIZER: 1
+          EXTENSION_FLAGS: -DLINK_FTS_STATICALLY=1
+          GEN: ninja
+        run: |
+          make release
+          mkdir -p runner-artifacts/current/release/benchmark
+          cp build/release/benchmark/benchmark_runner runner-artifacts/current/release/benchmark/
+
+      - name: Select base revision
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ -n "$BASE_HASH" ]]; then
+            base_ref="$BASE_HASH"
+          elif [[ "$EVENT_NAME" == "pull_request" && -n "$BASE_BRANCH" ]]; then
+            git fetch origin "$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+            base_ref="$(git merge-base "$GIT_REF" "origin/$BASE_BRANCH")"
+          elif [[ -n "$EVENT_BEFORE" && "$EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            base_ref="$EVENT_BEFORE"
+          else
+            base_ref="$(git rev-parse "$GIT_REF^")"
+          fi
+
+          echo "Selected base revision: $base_ref"
+          echo "BASE_REF=$base_ref" >> "$GITHUB_ENV"
+
+      - name: Build base benchmark runner
+        env:
+          BUILD_BENCHMARK: 1
+          DISABLE_SANITIZER: 1
+          EXTENSION_FLAGS: -DLINK_FTS_STATICALLY=1
+          GEN: ninja
+        run: |
+          git checkout --detach "$BASE_REF"
+          git submodule update --init --recursive
+          rm -rf build
+          make release
+          mkdir -p runner-artifacts/base/release/benchmark
+          cp build/release/benchmark/benchmark_runner runner-artifacts/base/release/benchmark/
+
+      - name: Upload benchmark runners
+        uses: actions/upload-artifact@v4
+        with:
+          name: fts-benchmark-runners
+          path: runner-artifacts
+          if-no-files-found: error
+
+  regression-bench:
+    name: Compare FTS benchmark runners
+    needs: build-runners
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_REF }}
+          submodules: recursive
+
+      - name: Download benchmark runners
+        uses: actions/download-artifact@v4
+        with:
+          name: fts-benchmark-runners
+          path: build
+
+      - name: Select benchmark sets
+        run: |
+          if [[ "$RUN_HAYSTACK" == "true" ]]; then
+            {
+              echo "LAYERED_BENCHMARKS=.github/regression/fts_layered_haystack.csv"
+              echo "AUTOCOMPLETE_BENCHMARKS=.github/regression/fts_autocomplete_haystack.csv"
+              echo "BENCHMARK_BUDGET_SECONDS=3600"
+            } >> "$GITHUB_ENV"
+          else
+            {
+              echo "LAYERED_BENCHMARKS=.github/regression/fts_layered.csv"
+              echo "AUTOCOMPLETE_BENCHMARKS=.github/regression/fts_autocomplete.csv"
+              echo "BENCHMARK_BUDGET_SECONDS=180"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Run regression benchmarks
+        env:
+          OLD_RUNNER: build/base/release/benchmark/benchmark_runner
+          NEW_RUNNER: build/current/release/benchmark/benchmark_runner
+        run: |
+          chmod +x "$OLD_RUNNER" "$NEW_RUNNER"
+          rm -rf duckdb_benchmark_data
+
+          run_benchmarks() {
+            set -euo pipefail
+
+            python3 duckdb/scripts/regression/test_runner.py \
+              --old "$OLD_RUNNER" \
+              --new "$NEW_RUNNER" \
+              --benchmarks "$LAYERED_BENCHMARKS" \
+              --root-dir . \
+              --threads 2 \
+              --clear-benchmark-cache \
+              --verbose 2>&1 | tee layered-regression.log
+
+            python3 duckdb/scripts/regression/test_runner.py \
+              --old "$NEW_RUNNER" \
+              --new "$NEW_RUNNER" \
+              --benchmarks "$AUTOCOMPLETE_BENCHMARKS" \
+              --root-dir . \
+              --threads 2 \
+              --clear-benchmark-cache \
+              --nofail \
+              --verbose 2>&1 | tee autocomplete-smoke.log
+          }
+
+          export -f run_benchmarks
+          export OLD_RUNNER NEW_RUNNER LAYERED_BENCHMARKS AUTOCOMPLETE_BENCHMARKS
+          timeout "${BENCHMARK_BUDGET_SECONDS}s" bash -c run_benchmarks
+
+      - name: Add timing output to job summary
+        if: always()
+        run: |
+          {
+            echo '## FTS layered regression'
+            echo '```text'
+            test ! -f layered-regression.log || cat layered-regression.log
+            echo '```'
+            echo '## FTS autocomplete smoke'
+            echo '```text'
+            test ! -f autocomplete-smoke.log || cat autocomplete-smoke.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fts-regression-logs-${{ github.run_attempt }}
+          path: |
+            layered-regression.log
+            autocomplete-smoke.log
+          if-no-files-found: ignore

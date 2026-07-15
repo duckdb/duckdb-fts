@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/incremental_delete.benchmark.in
+display_name=FTS layered incremental delete (1M - 10K)
+rows=1000000
+mutation_rows=10000

@@ -1,0 +1,3 @@
+benchmark/fts/layered_autocomplete/smoke/autocomplete_2char.benchmark
+benchmark/fts/layered_autocomplete/smoke/autocomplete_3char.benchmark
+benchmark/fts/layered_autocomplete/smoke/autocomplete_long.benchmark

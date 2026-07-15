@@ -1,0 +1,50 @@
+name ${display_name}
+group fts
+subgroup layered-query
+
+require fts
+
+init
+CREATE TABLE documents(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR);
+INSERT INTO documents
+SELECT 'doc' || lpad(i::VARCHAR, 12, '0') AS id,
+       'record category' || (i % 100)::VARCHAR || ' region' || (i % 20)::VARCHAR AS title,
+       'workspace item search benchmark ' ||
+           CASE i % 20
+               WHEN 0 THEN 'northstar prefixalpha running'
+               WHEN 1 THEN 'northstar prefixbeta runner'
+               WHEN 2 THEN 'southstar infixalpha runnable'
+               WHEN 3 THEN 'eaststar prefixgamma running'
+               WHEN 4 THEN 'weststar infixbeta runner'
+               ELSE 'baseline catalog archive'
+           END || ' ' || substr(md5(i::VARCHAR), 1, 16) AS body
+FROM range(${rows}) AS source(i);
+
+load
+PRAGMA create_fts_index('documents', 'id', 'title', 'body', stemmer='porter', stopwords='none', layered_search=true, incremental=true);
+
+assert I
+SELECT count(*) > 0
+FROM fts_main_documents.search_layered_bm25(
+    '${query_string}',
+    fields := 'body',
+    top_k := 50,
+    enable_prefix := ${enable_prefix},
+    enable_substring := ${enable_substring},
+    enable_fuzzy := ${enable_fuzzy},
+    enable_short_fuzzy := ${enable_short_fuzzy}
+)
+----
+true
+
+run
+SELECT docname, score, rank
+FROM fts_main_documents.search_layered_bm25(
+    '${query_string}',
+    fields := 'body',
+    top_k := 50,
+    enable_prefix := ${enable_prefix},
+    enable_substring := ${enable_substring},
+    enable_fuzzy := ${enable_fuzzy},
+    enable_short_fuzzy := ${enable_short_fuzzy}
+);
