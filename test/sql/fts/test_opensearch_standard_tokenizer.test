@@ -94,6 +94,18 @@ WHERE term = 'cafe'
 ----
 0
 
+query T
+SELECT hex(token)
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(lower(
+        'cafe' || chr(769) || ' A' || chr(778) || 'ngström man' || chr(771) || 'ana'
+    ))) AS token
+)
+----
+63616665CC81
+61CC8A6E67737472C3B66D
+6D616ECC83616E61
+
 statement ok
 PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='opensearch_standard', stemmer='none', stopwords='none', strip_accents=false, overwrite=true)
 
