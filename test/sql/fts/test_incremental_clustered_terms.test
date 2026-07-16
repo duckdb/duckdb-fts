@@ -1,5 +1,5 @@
 # name: test/sql/fts/test_incremental_clustered_terms.test
-# description: Test clustered terms ordering with incremental FTS updates
+# description: Test clustered terms maintenance with incremental FTS updates
 # group: [fts]
 
 require fts
@@ -20,46 +20,27 @@ INSERT INTO clustered_docs VALUES
 statement ok
 PRAGMA create_fts_index('clustered_docs', 'id', 'body', stemmer='none', stopwords='none', incremental=true, cluster_terms=true)
 
-query I
-SELECT count(*)
-FROM (
-    SELECT termid, fieldid, docid,
-           lag(termid) OVER () AS previous_termid,
-           lag(fieldid) OVER () AS previous_fieldid,
-           lag(docid) OVER () AS previous_docid
-    FROM fts_main_clustered_docs.terms
-) ordered_terms
-WHERE previous_termid IS NOT NULL
-  AND (
-      termid < previous_termid
-      OR (termid = previous_termid AND fieldid < previous_fieldid)
-      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
-  )
-----
-0
-
 statement ok
 INSERT INTO clustered_docs VALUES
     ('doc4', 'alpha aardvark aardvark'),
     ('doc5', 'gamma beta beta')
 
-query I
-SELECT count(*)
-FROM (
-    SELECT termid, fieldid, docid,
-           lag(termid) OVER () AS previous_termid,
-           lag(fieldid) OVER () AS previous_fieldid,
-           lag(docid) OVER () AS previous_docid
-    FROM fts_main_clustered_docs.terms
-) ordered_terms
-WHERE previous_termid IS NOT NULL
-  AND (
-      termid < previous_termid
-      OR (termid = previous_termid AND fieldid < previous_fieldid)
-      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
-  )
+query III rowsort
+SELECT docs.name, dict.term, count(*) AS tf
+FROM fts_main_clustered_docs.terms AS terms
+JOIN fts_main_clustered_docs.docs AS docs ON docs.docid = terms.docid
+JOIN fts_main_clustered_docs.dict AS dict ON dict.termid = terms.termid
+GROUP BY docs.name, dict.term
 ----
-0
+doc1	alpha	2
+doc1	beta	1
+doc2	beta	1
+doc2	gamma	1
+doc3	delta	1
+doc4	aardvark	2
+doc4	alpha	1
+doc5	beta	2
+doc5	gamma	1
 
 query II
 SELECT term, df FROM fts_main_clustered_docs.dict ORDER BY term
@@ -91,23 +72,19 @@ SELECT count(*) FROM diffs
 statement ok
 DELETE FROM clustered_docs WHERE id IN ('doc3', 'doc4')
 
-query I
-SELECT count(*)
-FROM (
-    SELECT termid, fieldid, docid,
-           lag(termid) OVER () AS previous_termid,
-           lag(fieldid) OVER () AS previous_fieldid,
-           lag(docid) OVER () AS previous_docid
-    FROM fts_main_clustered_docs.terms
-) ordered_terms
-WHERE previous_termid IS NOT NULL
-  AND (
-      termid < previous_termid
-      OR (termid = previous_termid AND fieldid < previous_fieldid)
-      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
-  )
+query III rowsort
+SELECT docs.name, dict.term, count(*) AS tf
+FROM fts_main_clustered_docs.terms AS terms
+JOIN fts_main_clustered_docs.docs AS docs ON docs.docid = terms.docid
+JOIN fts_main_clustered_docs.dict AS dict ON dict.termid = terms.termid
+GROUP BY docs.name, dict.term
 ----
-0
+doc1	alpha	2
+doc1	beta	1
+doc2	beta	1
+doc2	gamma	1
+doc5	beta	2
+doc5	gamma	1
 
 query II
 SELECT term, df FROM fts_main_clustered_docs.dict ORDER BY term
@@ -152,23 +129,19 @@ beta	2
 gamma	2
 zebra	1
 
-query I
-SELECT count(*)
-FROM (
-    SELECT termid, fieldid, docid,
-           lag(termid) OVER () AS previous_termid,
-           lag(fieldid) OVER () AS previous_fieldid,
-           lag(docid) OVER () AS previous_docid
-    FROM fts_main_clustered_docs.terms
-) ordered_terms
-WHERE previous_termid IS NOT NULL
-  AND (
-      termid < previous_termid
-      OR (termid = previous_termid AND fieldid < previous_fieldid)
-      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
-  )
+query III rowsort
+SELECT docs.name, dict.term, count(*) AS tf
+FROM fts_main_clustered_docs.terms AS terms
+JOIN fts_main_clustered_docs.docs AS docs ON docs.docid = terms.docid
+JOIN fts_main_clustered_docs.dict AS dict ON dict.termid = terms.termid
+GROUP BY docs.name, dict.term
 ----
-0
+doc1	alpha	2
+doc1	beta	1
+doc2	gamma	1
+doc2	zebra	2
+doc5	beta	2
+doc5	gamma	1
 
 query I rowsort
 SELECT id FROM (
@@ -188,9 +161,9 @@ WHERE score IS NOT NULL
 ----
 0
 
-# Clustered incremental indexes expose `terms` as an ordered view backed by an
-# internal storage table. Non-incremental clustered indexes keep `terms` as a
-# physical table.
+# Clustered incremental indexes expose `terms` as a view backed by an internal
+# storage table. Non-incremental clustered indexes keep `terms` as a physical
+# table.
 statement ok
 CREATE TABLE clustered_static_docs(id VARCHAR, body VARCHAR)
 
@@ -311,26 +284,7 @@ SELECT
 statement ok
 INSERT INTO overwrite_clustered_docs VALUES ('doc2', 'aardvark alpha')
 
-query I
-SELECT count(*)
-FROM (
-    SELECT termid, fieldid, docid,
-           lag(termid) OVER () AS previous_termid,
-           lag(fieldid) OVER () AS previous_fieldid,
-           lag(docid) OVER () AS previous_docid
-    FROM fts_main_overwrite_clustered_docs.terms
-) ordered_terms
-WHERE previous_termid IS NOT NULL
-  AND (
-      termid < previous_termid
-      OR (termid = previous_termid AND fieldid < previous_fieldid)
-      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
-  )
-----
-0
-
-# Multiple indexed columns should preserve field ids and order by term, field,
-# then document.
+# Multiple indexed columns should preserve field ids.
 statement ok
 CREATE TABLE multi_field_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
 
@@ -364,24 +318,6 @@ body	beta	2
 body	gamma	1
 title	alpha	2
 title	beta	1
-
-query I
-SELECT count(*)
-FROM (
-    SELECT termid, fieldid, docid,
-           lag(termid) OVER () AS previous_termid,
-           lag(fieldid) OVER () AS previous_fieldid,
-           lag(docid) OVER () AS previous_docid
-    FROM fts_main_multi_field_docs.terms
-) ordered_terms
-WHERE previous_termid IS NOT NULL
-  AND (
-      termid < previous_termid
-      OR (termid = previous_termid AND fieldid < previous_fieldid)
-      OR (termid = previous_termid AND fieldid = previous_fieldid AND docid < previous_docid)
-  )
-----
-0
 
 query I rowsort
 SELECT id FROM (

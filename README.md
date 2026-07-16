@@ -58,9 +58,8 @@ document id values. Persistent databases must use storage version `v2.0.0` or
 newer for incremental indexes.
 
 `cluster_terms = true` changes only the physical ordering of the generated
-`terms` table. It cannot be combined with `incremental = true` unless
-`layered_search = true`, because incremental inserts do not preserve the static
-clustered layout.
+`terms` table. For incremental indexes, the initial index build uses the
+clustered layout, but trigger-appended rows are not globally reclustered.
 
 ### `PRAGMA drop_fts_index`
 

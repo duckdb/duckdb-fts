@@ -880,7 +880,7 @@ static string ClusteredIncrementalIndexSetupScript() {
       "%%fts_schema%%.terms;\n"
       "DROP TABLE %%fts_schema%%.terms;\n"
       "CREATE VIEW %%fts_schema%%.terms AS SELECT termid, docid, fieldid FROM "
-      "%%fts_schema%%.%s ORDER BY termid, fieldid, docid;",
+      "%%fts_schema%%.%s;",
       GetFTSTermsStorageTable(), GetFTSTermsStorageTable());
 }
 
