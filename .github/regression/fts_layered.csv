@@ -1,0 +1,9 @@
+benchmark/fts/layered_autocomplete/smoke/index_create.benchmark
+benchmark/fts/layered_autocomplete/smoke/layered_exact.benchmark
+benchmark/fts/layered_autocomplete/smoke/layered_prefix.benchmark
+benchmark/fts/layered_autocomplete/smoke/layered_substring.benchmark
+benchmark/fts/layered_autocomplete/smoke/layered_fuzzy.benchmark
+benchmark/fts/layered_autocomplete/smoke/layered_mixed.benchmark
+benchmark/fts/layered_autocomplete/smoke/layered_match.benchmark
+benchmark/fts/layered_autocomplete/smoke/incremental_insert.benchmark
+benchmark/fts/layered_autocomplete/smoke/incremental_delete.benchmark

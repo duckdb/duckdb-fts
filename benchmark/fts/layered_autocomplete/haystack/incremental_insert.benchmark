@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/incremental_insert.benchmark.in
+display_name=FTS layered incremental insert (1M + 10K)
+rows=1000000
+mutation_rows=10000

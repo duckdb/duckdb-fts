@@ -1,0 +1,3 @@
+template benchmark/fts/layered_autocomplete/templates/index_create.benchmark.in
+display_name=FTS layered index creation (50K)
+rows=50000

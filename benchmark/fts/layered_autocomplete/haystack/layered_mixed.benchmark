@@ -1,0 +1,8 @@
+template benchmark/fts/layered_autocomplete/templates/layered_query.benchmark.in
+display_name=FTS layered mixed query (1M)
+rows=1000000
+query_string=northstar prefi
+enable_prefix=true
+enable_substring=true
+enable_fuzzy=true
+enable_short_fuzzy=true
