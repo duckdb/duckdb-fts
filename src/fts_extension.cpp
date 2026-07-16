@@ -28,7 +28,8 @@ static bool IsOpenSearchStandardEmoji(UChar32 codepoint) {
 }
 
 static bool IsOpenSearchStandardIntraTokenPunctuation(UChar32 codepoint) {
-  return codepoint == '\'' || codepoint == '.' || codepoint == '_';
+  return codepoint == '\'' || codepoint == 0x2019 || codepoint == '.' ||
+         codepoint == '_';
 }
 
 static bool IsJapaneseProlongedSoundMark(UChar32 codepoint) {

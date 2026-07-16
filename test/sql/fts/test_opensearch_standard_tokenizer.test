@@ -81,6 +81,19 @@ node.js
 query T
 SELECT token
 FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(
+        'It’s l’amour rock’n’roll John''s'
+    )) AS token
+)
+----
+It’s
+l’amour
+rock’n’roll
+John's
+
+query T
+SELECT token
+FROM (
     SELECT unnest(fts_tokenize_opensearch_standard(lower(
         'abc123 123abc 42 3.14 version-2 test_99 東京2024'
     ))) AS token
