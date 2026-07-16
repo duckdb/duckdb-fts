@@ -30,8 +30,7 @@ static bool IsOpenSearchStandardEmoji(UChar32 codepoint) {
 static bool IsOpenSearchStandardCombiningMark(UChar32 codepoint) {
   auto char_type = u_charType(codepoint);
   return char_type == U_NON_SPACING_MARK ||
-         char_type == U_COMBINING_SPACING_MARK ||
-         char_type == U_ENCLOSING_MARK;
+         char_type == U_COMBINING_SPACING_MARK || char_type == U_ENCLOSING_MARK;
 }
 
 static bool IsOpenSearchStandardIntraTokenPunctuation(UChar32 codepoint) {
