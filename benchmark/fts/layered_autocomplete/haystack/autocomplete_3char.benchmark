@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/autocomplete_query.benchmark.in
+display_name=FTS autocomplete mixed three-character query (1M)
+rows=1000000
+query_string=northstar run

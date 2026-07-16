@@ -43,7 +43,7 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` |
 | `lower` | `BOOLEAN` | Whether to convert all text to lowercase. Defaults to `1` |
 | `overwrite` | `BOOLEAN` | Whether to overwrite an existing index on a table. Defaults to `0` |
-| `incremental` | `BOOLEAN` | Whether to keep the index in sync for subsequent `INSERT` and `DELETE` statements using triggers. Defaults to `0` |
+| `incremental` | `BOOLEAN` | Whether to maintain the FTS index with triggers after inserts and deletes on the input table. Defaults to `0` |
 | `cluster_terms` | `BOOLEAN` | Whether to physically order the generated `terms` table by `termid`, `fieldid`, and `docid`. This can improve query-time pruning for direct reads from the FTS tables. Defaults to `0` |
 | `layered_search` | `BOOLEAN` | Whether to build a dictionary trigram sidecar and layered BM25 search macros for exact, prefix, substring, and fuzzy query expansion. This implies `cluster_terms`. Defaults to `0` |
 
@@ -60,9 +60,8 @@ document id values. Persistent databases must use storage version `v2.0.0` or
 newer for incremental indexes.
 
 `cluster_terms = true` changes only the physical ordering of the generated
-`terms` table. It cannot be combined with `incremental = true` unless
-`layered_search = true`, because incremental inserts do not preserve the static
-clustered layout.
+`terms` table. For incremental indexes, the initial index build uses the
+clustered layout, but trigger-appended rows are not globally reclustered.
 
 ### `PRAGMA drop_fts_index`
 
@@ -103,13 +102,15 @@ search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2,
                     b := 0.75, term_limit := 32, max_df_ratio := 0.15,
                     max_df := 50000, enable_prefix := true,
                     enable_substring := true, enable_fuzzy := true,
-                    enable_short_fuzzy := true, expand_exact_terms := false)
+                    enable_short_fuzzy := true, expand_exact_terms := false,
+                    query_mode := 'standard')
 
 match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2,
                    b := 0.75, term_limit := 32, max_df_ratio := 0.15,
                    max_df := 50000, enable_prefix := true,
                    enable_substring := true, enable_fuzzy := true,
-                   enable_short_fuzzy := true, expand_exact_terms := false)
+                   enable_short_fuzzy := true, expand_exact_terms := false,
+                   query_mode := 'standard')
 ```
 
 When `layered_search` is enabled, the extension builds dictionary sidecar
@@ -140,6 +141,7 @@ filtering, and BM25 parameters as the base FTS index.
 | `enable_fuzzy` | `BOOLEAN` | Whether to include Damerau-Levenshtein fuzzy alternatives. Defaults to `true` |
 | `enable_short_fuzzy` | `BOOLEAN` | Whether to use a length-clustered path for short fuzzy alternatives. Defaults to `true` |
 | `expand_exact_terms` | `BOOLEAN` | Whether to also expand a query term that already has an exact dictionary match. Defaults to `false` |
+| `query_mode` | `VARCHAR` | Query execution mode. `standard` uses exact, prefix, substring, and fuzzy dictionary expansion. `autocomplete` keeps preceding tokens exact and matches the final token by raw-token prefix. Defaults to `standard` |
 
 <!-- markdownlint-enable MD056 -->
 
@@ -148,6 +150,13 @@ fuzzy alternatives are optional and receive lower expansion weights before BM25
 scoring. Numeric query terms are searched exactly and are excluded from
 trigram/fuzzy expansion. Stopwords are removed before both exact matching and
 expansion, so a query containing only stopwords returns no rows.
+
+Autocomplete mode requires a final searchable token of at least two characters.
+It routes that token through a compact two/three-character prefix table and
+then verifies the full raw-token prefix. The existing postings table stores a
+raw-token identifier alongside each stemmed term, so autocomplete remains
+correct when multiple raw forms share a stem. It does not use substring or
+fuzzy expansion for the final token.
 
 Layered search can be static or incremental. With `layered_search = true` and
 `incremental = false`, the sidecar tables are built once and later table
@@ -333,6 +342,20 @@ FROM fts_main_animal_sounds.search_layered_bm25(
     'mark',
     fields := 'author',
     expand_exact_terms := true
+);
+```
+
+For low-latency term-prefix search, use autocomplete mode. Earlier tokens are
+matched exactly after the configured stemming, while only the final token is
+treated as a raw prefix:
+
+```sql
+SELECT docname, score, rank
+FROM fts_main_animal_sounds.search_layered_bm25(
+    'han quac',
+    fields := 'text_content,author',
+    query_mode := 'autocomplete',
+    top_k := 10
 );
 ```
 

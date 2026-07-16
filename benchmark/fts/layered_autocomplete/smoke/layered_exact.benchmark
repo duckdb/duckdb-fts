@@ -1,0 +1,8 @@
+template benchmark/fts/layered_autocomplete/templates/layered_query.benchmark.in
+display_name=FTS layered exact query (50K)
+rows=50000
+query_string=northstar
+enable_prefix=true
+enable_substring=true
+enable_fuzzy=true
+enable_short_fuzzy=true

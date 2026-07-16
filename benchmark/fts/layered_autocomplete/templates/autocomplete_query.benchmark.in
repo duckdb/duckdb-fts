@@ -1,0 +1,58 @@
+name ${display_name}
+group fts
+subgroup autocomplete-query
+
+require fts
+
+init
+CREATE TABLE documents(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR);
+INSERT INTO documents
+SELECT 'doc' || lpad(i::VARCHAR, 12, '0') AS id,
+       'record category' || (i % 100)::VARCHAR || ' region' || (i % 20)::VARCHAR AS title,
+       'workspace item search benchmark ' ||
+           CASE i % 20
+               WHEN 0 THEN 'northstar prefixalpha running'
+               WHEN 1 THEN 'northstar prefixbeta runner'
+               WHEN 2 THEN 'southstar infixalpha runnable'
+               WHEN 3 THEN 'eaststar prefixgamma running'
+               WHEN 4 THEN 'weststar infixbeta runner'
+               ELSE 'baseline catalog archive'
+           END || ' ' || substr(md5(i::VARCHAR), 1, 16) AS body
+FROM range(${rows}) AS source(i);
+
+load
+PRAGMA create_fts_index('documents', 'id', 'title', 'body', stemmer='porter', stopwords='none', layered_search=true, incremental=true);
+
+assert I
+SELECT count(*) <= 2 * (SELECT count(*) FROM fts_main_documents.raw_dict)
+FROM fts_main_documents.term_prefixes
+----
+true
+
+assert I
+SELECT count(*)
+FROM fts_main_documents.term_prefixes AS prefixes
+LEFT JOIN fts_main_documents.raw_dict AS dictionary USING (rawtermid)
+WHERE dictionary.rawtermid IS NULL
+----
+0
+
+assert I
+SELECT count(*) > 0
+FROM fts_main_documents.search_layered_bm25(
+    '${query_string}',
+    fields := 'body',
+    top_k := 50,
+    query_mode := 'autocomplete'
+)
+----
+true
+
+run
+SELECT docname, score, rank
+FROM fts_main_documents.search_layered_bm25(
+    '${query_string}',
+    fields := 'body',
+    top_k := 50,
+    query_mode := 'autocomplete'
+);

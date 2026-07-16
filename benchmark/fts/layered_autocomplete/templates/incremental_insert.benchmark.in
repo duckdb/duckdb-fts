@@ -1,0 +1,40 @@
+name ${display_name}
+group fts
+subgroup layered-maintenance
+
+require fts
+
+init
+CREATE TABLE generated_documents AS
+SELECT i,
+       'doc' || lpad(i::VARCHAR, 12, '0') AS id,
+       'record category' || (i % 100)::VARCHAR || ' region' || (i % 20)::VARCHAR AS title,
+       'workspace item search benchmark ' ||
+           CASE i % 20
+               WHEN 0 THEN 'northstar prefixalpha running'
+               WHEN 1 THEN 'northstar prefixbeta runner'
+               WHEN 2 THEN 'southstar infixalpha runnable'
+               WHEN 3 THEN 'eaststar prefixgamma running'
+               WHEN 4 THEN 'weststar infixbeta runner'
+               ELSE 'baseline catalog archive'
+           END || ' ' || substr(md5(i::VARCHAR), 1, 16) AS body
+FROM range(${rows} + ${mutation_rows}) AS source(i);
+CREATE TABLE documents(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR);
+INSERT INTO documents SELECT id, title, body FROM generated_documents WHERE i < ${rows};
+CREATE TABLE mutation_rows AS SELECT id, title, body FROM generated_documents WHERE i >= ${rows};
+DROP TABLE generated_documents;
+
+load
+PRAGMA create_fts_index('documents', 'id', 'title', 'body', stemmer='porter', stopwords='none', layered_search=true, incremental=true);
+
+assert II
+SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM mutation_rows)
+----
+${rows}	${mutation_rows}
+
+run
+INSERT INTO documents SELECT * FROM mutation_rows;
+
+cleanup
+DELETE FROM documents USING mutation_rows WHERE documents.id = mutation_rows.id;
+SELECT CASE WHEN count(*) = ${rows} THEN true ELSE error('incremental insert cleanup failed') END FROM documents;

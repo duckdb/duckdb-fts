@@ -24,7 +24,7 @@ jobs:
         with:
           sparse-checkout: .github
       - id: version
-        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> $GITHUB_OUTPUT
+        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
 
   duckdb-stable-build:
     name: Build extension binaries
@@ -35,11 +35,18 @@ jobs:
       ci_tools_version: main
       extension_name: fts
 
+  fts-regression:
+    name: FTS regression benchmarks
+    uses: ./.github/workflows/Regression.yml
+    with:
+      git_ref: ${{ github.sha }}
+
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs:
       - get-duckdb-version
       - duckdb-stable-build
+      - fts-regression
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
     secrets: inherit
     with:
@@ -49,6 +56,7 @@ jobs:
 
   code-quality-check:
     name: Code Quality Check
+    needs: get-duckdb-version
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
     with:
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
