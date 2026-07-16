@@ -7,13 +7,18 @@ project(FTSExtension)
 
 set(EXTENSION_BASE_FOLDER "src")
 set(SNOWBALL_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/third_party/snowball")
-set(DUCKDB_ICU_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/duckdb/extension/icu")
+if(DEFINED DUCKDB_MODULE_BASE_DIR)
+  set(DUCKDB_SOURCE_BASE_FOLDER "${DUCKDB_MODULE_BASE_DIR}")
+else()
+  set(DUCKDB_SOURCE_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/duckdb")
+endif()
+set(DUCKDB_ICU_BASE_FOLDER "${DUCKDB_SOURCE_BASE_FOLDER}/extension/icu")
 include_directories(
     ${EXTENSION_BASE_FOLDER}/include
     ${SNOWBALL_BASE_FOLDER}/include
     ${SNOWBALL_BASE_FOLDER}/libstemmer
     ${SNOWBALL_BASE_FOLDER}/runtime
-    ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/utf8proc/include
+    ${DUCKDB_SOURCE_BASE_FOLDER}/third_party/utf8proc/include
     ${DUCKDB_ICU_BASE_FOLDER}/third_party/icu/common
     ${DUCKDB_ICU_BASE_FOLDER}/third_party/icu/i18n)
 
