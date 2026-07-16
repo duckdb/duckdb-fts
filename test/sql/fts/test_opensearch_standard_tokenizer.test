@@ -1,0 +1,170 @@
+# name: test/sql/fts/test_opensearch_standard_tokenizer.test
+# description: Test OpenSearch standard-tokenizer parity for multilingual FTS tokenization.
+# group: [fts]
+
+require fts
+
+require no_alternative_verify
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(lower(strip_accents(
+        'תל-אביב ביב Привет-мир مرحبا-بالعالم 東京大学に行く 北京大学 한국어 테스트 café'
+    )))) AS token
+)
+----
+תל
+אביב
+ביב
+привет
+мир
+مرحبا
+بالعالم
+東
+京
+大
+学
+に
+行
+く
+北
+京
+大
+学
+한국어
+테스트
+cafe
+
+statement ok
+CREATE TABLE unicode_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO unicode_docs VALUES ('doc1', 'תל-אביב ביב Привет-мир مرحبا-بالعالم 東京大学に行く 北京大学 한국어 테스트 café')
+
+statement ok
+PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='opensearch_standard', stemmer='none', stopwords='none')
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term IN ('東京大学に行く', '北京大学')
+----
+0
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term IN ('東', '京', '大', '学', 'に', '行', 'く', '北', '한국어', '테스트')
+----
+10
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(lower(
+        'John''s co-op email@example.com foo_bar snake_case C++ C# node.js'
+    ))) AS token
+)
+----
+john's
+co
+op
+email
+example.com
+foo_bar
+snake_case
+c
+c
+node.js
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(
+        'It’s l’amour rock’n’roll John''s'
+    )) AS token
+)
+----
+It’s
+l’amour
+rock’n’roll
+John's
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(lower(
+        'abc123 123abc 42 3.14 version-2 test_99 東京2024'
+    ))) AS token
+)
+----
+abc123
+123abc
+42
+3.14
+version
+2
+test_99
+東
+京
+2024
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(
+        'ひらがな カタカナ ｶﾀｶﾅ ー タワー オープンサーチ'
+    )) AS token
+)
+----
+ひ
+ら
+が
+な
+カタカナ
+ｶﾀｶﾅ
+ー
+タワー
+オープンサーチ
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(lower(
+        'hello🙂world #hashtag @user path/to/file 中文🙂test'
+    ))) AS token
+)
+----
+hello
+🙂
+world
+hashtag
+user
+path
+to
+file
+中
+文
+🙂
+test
+
+query T
+SELECT token
+FROM (
+    SELECT unnest(fts_tokenize_opensearch_standard(lower(
+        '한국어 테스트 서울대학교 K-pop 한글-테스트'
+    ))) AS token
+)
+----
+한국어
+테스트
+서울대학교
+k
+pop
+한글
+테스트
+
+statement error
+PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='unknown', overwrite=true)
+----

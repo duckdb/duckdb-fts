@@ -10,6 +10,9 @@ include_directories = [
         'third_party/snowball/libstemmer',
         'third_party/snowball/runtime',
         'third_party/snowball/src_c',
+        'third_party/utf8proc/include',
+        'extension/icu/third_party/icu/common',
+        'extension/icu/third_party/icu/i18n',
     ]
 ]
 # source files

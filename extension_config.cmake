@@ -4,6 +4,8 @@ if (LINK_FTS_STATICALLY)
     set(FTS_DONT_LINK "")
 endif()
 
+duckdb_extension_load(icu)
+
 # Extension from this repo
 duckdb_extension_load(fts
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
