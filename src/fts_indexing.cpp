@@ -2156,24 +2156,38 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
                ? BooleanValue::Get(it->second)
                : def;
   };
+  auto has_named_parameter = [&](const string &name) {
+    return parameters.named_parameters.find(Identifier(name)) !=
+           parameters.named_parameters.end();
+  };
 
   const string stemmer = get_string("stemmer", "porter");
   const string tokenizer = get_string("tokenizer", "regex");
   const string stopwords = get_string("stopwords", "english");
   const string ignore =
       get_string("ignore", "[0-9!@#$%^&*()_+={}\\[\\]:;<>,.?~\\\\/\\|''\"`-]+");
-  const bool strip_accents = get_bool("strip_accents", true);
-  const bool lower = get_bool("lower", true);
-  const bool overwrite = get_bool("overwrite", false);
-  const bool incremental = get_bool("incremental", false);
-  const bool layered_search = get_bool("layered_search", false);
-  const bool cluster_terms = get_bool("cluster_terms", false) || layered_search;
 
   if (tokenizer != "regex" && tokenizer != "opensearch_standard") {
     throw InvalidInputException(
         "Unrecognized tokenizer '%s'. Supported tokenizers are: ['regex', "
         "'opensearch_standard']",
         tokenizer);
+  }
+
+  const bool strip_accents =
+      get_bool("strip_accents", tokenizer != "opensearch_standard");
+  const bool lower = get_bool("lower", true);
+  const bool overwrite = get_bool("overwrite", false);
+  const bool incremental = get_bool("incremental", false);
+  const bool layered_search = get_bool("layered_search", false);
+  const bool cluster_terms = get_bool("cluster_terms", false) || layered_search;
+
+  if (tokenizer == "opensearch_standard" && strip_accents &&
+      has_named_parameter("strip_accents")) {
+    throw InvalidInputException(
+        "strip_accents=true is not supported with tokenizer "
+        "'opensearch_standard'. OpenSearch's standard analyzer lowercases "
+        "tokens but does not strip accents; use strip_accents=false.");
   }
 
   if (stopwords != "english" && stopwords != "none") {

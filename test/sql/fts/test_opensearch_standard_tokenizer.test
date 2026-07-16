@@ -40,7 +40,7 @@ statement ok
 CREATE TABLE unicode_docs(id VARCHAR, body VARCHAR)
 
 statement ok
-INSERT INTO unicode_docs VALUES ('doc1', 'תל-אביב ביב Привет-мир مرحبا-بالعالم 東京大学に行く 北京大学 한국어 테스트 café')
+INSERT INTO unicode_docs VALUES ('doc1', 'תל-אביב ביב Привет-мир مرحبا-بالعالم 東京大学に行く 北京大学 한국어 테스트 서울대학교 한글-테스트 café')
 
 statement ok
 PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='opensearch_standard', stemmer='none', stopwords='none')
@@ -58,6 +58,48 @@ FROM fts_main_unicode_docs.dict
 WHERE term IN ('東', '京', '大', '学', 'に', '行', 'く', '北', '한국어', '테스트')
 ----
 10
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term = '서울대학교'
+----
+1
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term = '서울'
+----
+0
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term = '한글'
+----
+1
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term = 'café'
+----
+1
+
+query I
+SELECT count(*)
+FROM fts_main_unicode_docs.dict
+WHERE term = 'cafe'
+----
+0
+
+statement ok
+PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='opensearch_standard', stemmer='none', stopwords='none', strip_accents=false, overwrite=true)
+
+statement error
+PRAGMA create_fts_index('unicode_docs', 'id', 'body', tokenizer='opensearch_standard', stemmer='none', stopwords='none', strip_accents=true, overwrite=true)
+----
 
 query T
 SELECT token
