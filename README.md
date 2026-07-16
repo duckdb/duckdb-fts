@@ -41,7 +41,7 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` |
 | `lower` | `BOOLEAN` | Whether to convert all text to lowercase. Defaults to `1` |
 | `overwrite` | `BOOLEAN` | Whether to overwrite an existing index on a table. Defaults to `0` |
-| `incremental` | `BOOLEAN` | Whether to keep the index in sync for subsequent `INSERT` and `DELETE` statements using triggers. Defaults to `0` |
+| `incremental` | `BOOLEAN` | Whether to maintain the FTS index with triggers after inserts and deletes on the input table. Defaults to `0` |
 | `cluster_terms` | `BOOLEAN` | Whether to physically order the generated `terms` table by `termid`, `fieldid`, and `docid`. This can improve query-time pruning for direct reads from the FTS tables. Defaults to `0` |
 | `layered_search` | `BOOLEAN` | Whether to build a dictionary trigram sidecar and layered BM25 search macros for exact, prefix, substring, and fuzzy query expansion. This implies `cluster_terms`. Defaults to `0` |
 
@@ -58,9 +58,8 @@ document id values. Persistent databases must use storage version `v2.0.0` or
 newer for incremental indexes.
 
 `cluster_terms = true` changes only the physical ordering of the generated
-`terms` table. It cannot be combined with `incremental = true` unless
-`layered_search = true`, because incremental inserts do not preserve the static
-clustered layout.
+`terms` table. For incremental indexes, the initial index build uses the
+clustered layout, but trigger-appended rows are not globally reclustered.
 
 ### `PRAGMA drop_fts_index`
 

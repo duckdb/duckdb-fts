@@ -63,18 +63,31 @@ SELECT name, len FROM fts_main_primary_key_docs.docs
 ----
 doc1	1
 
-# Clustered terms are a static physical layout; incremental inserts would append
-# new terms after the clustered build and invalidate that ordering guarantee.
+# Clustered incremental indexes keep the public terms relation updated after
+# writes.
 statement ok
 CREATE TABLE clustered_incremental_docs(id VARCHAR NOT NULL, body VARCHAR)
 
 statement ok
 INSERT INTO clustered_incremental_docs VALUES ('doc1', 'alpha beta')
 
-statement error
+statement ok
 PRAGMA create_fts_index('clustered_incremental_docs', 'id', 'body', stemmer='none', stopwords='none', incremental=true, cluster_terms=true)
+
+statement ok
+INSERT INTO clustered_incremental_docs VALUES ('doc2', 'alpha aardvark')
+
+query III rowsort
+SELECT docs.name, dict.term, count(*) AS tf
+FROM fts_main_clustered_incremental_docs.terms AS terms
+JOIN fts_main_clustered_incremental_docs.docs AS docs ON docs.docid = terms.docid
+JOIN fts_main_clustered_incremental_docs.dict AS dict ON dict.termid = terms.termid
+GROUP BY docs.name, dict.term
 ----
-cluster_terms cannot be combined with incremental FTS indexes
+doc1	alpha	1
+doc1	beta	1
+doc2	aardvark	1
+doc2	alpha	1
 
 # Incremental indexes require unique document ids so DELETE triggers do not
 # remove multiple indexed documents for a single deleted source row.

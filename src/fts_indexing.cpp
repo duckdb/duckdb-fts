@@ -19,12 +19,15 @@ namespace duckdb {
 static QualifiedName GetQualifiedName(ClientContext &context,
                                       const string &qname_str) {
   auto qname = QualifiedName::Parse(qname_str);
-  if (qname.Schema() == INVALID_SCHEMA) {
-    return QualifiedName(
-        qname.Catalog(),
+  if (qname.Schema().empty()) {
+    vector<Identifier> schema_path;
+    if (!qname.Catalog().empty()) {
+      schema_path.push_back(qname.Catalog());
+    }
+    schema_path.push_back(
         ClientData::Get(context).catalog_search_path->GetDefaultSchema(
-            qname.Catalog()),
-        qname.Name());
+            context, qname.Catalog()));
+    qname = qname.WithQualification(std::move(schema_path));
   }
   return qname;
 }
@@ -60,9 +63,24 @@ static vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname) {
           prefix + "30_dict_df", prefix + "40_stats"};
 }
 
+static vector<string>
+GetFTSClusteredInsertTriggerNames(const QualifiedName &qname) {
+  auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
+  return {prefix + "00_docs", prefix + "10_dict_insert",
+          prefix + "20_terms_store", prefix + "30_dict_df",
+          prefix + "40_stats"};
+}
+
 static vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
   return {prefix + "00_dict_df", prefix + "10_terms", prefix + "20_docs",
+          prefix + "30_dict_prune", prefix + "40_stats"};
+}
+
+static vector<string>
+GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname) {
+  auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
+  return {prefix + "00_dict_df", prefix + "10_terms_store", prefix + "20_docs",
           prefix + "30_dict_prune", prefix + "40_stats"};
 }
 
@@ -95,6 +113,12 @@ static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
                 layered_insert_triggers.end());
   auto delete_triggers = GetFTSDeleteTriggerNames(qname);
   result.insert(result.end(), delete_triggers.begin(), delete_triggers.end());
+  auto clustered_insert_triggers = GetFTSClusteredInsertTriggerNames(qname);
+  result.insert(result.end(), clustered_insert_triggers.begin(),
+                clustered_insert_triggers.end());
+  auto clustered_delete_triggers = GetFTSClusteredDeleteTriggerNames(qname);
+  result.insert(result.end(), clustered_delete_triggers.begin(),
+                clustered_delete_triggers.end());
   auto layered_delete_triggers = GetFTSLayeredDeleteTriggerNames(qname);
   result.insert(result.end(), layered_delete_triggers.begin(),
                 layered_delete_triggers.end());
@@ -108,6 +132,10 @@ static string GetFTSBuildTermsTable(const QualifiedName &qname) {
 
 static string GetFTSBuildDictTable(const QualifiedName &qname) {
   return SQLIdentifier::ToString("__fts_build_dict_" + GetFTSSchemaName(qname));
+}
+
+static string GetFTSTermsStorageTable() {
+  return SQLIdentifier::ToString("__terms_storage");
 }
 
 static string GetFTSBuildRawDictTable(const QualifiedName &qname) {
@@ -1069,6 +1097,16 @@ static string IncrementalIndexSetupScript(const QualifiedName &qname) {
       SQLIdentifier::ToString(index_name));
 }
 
+static string ClusteredIncrementalIndexSetupScript() {
+  return StringUtil::Format(
+      "CREATE TABLE %%fts_schema%%.%s AS SELECT termid, docid, fieldid FROM "
+      "%%fts_schema%%.terms;\n"
+      "DROP TABLE %%fts_schema%%.terms;\n"
+      "CREATE VIEW %%fts_schema%%.terms AS SELECT termid, docid, fieldid FROM "
+      "%%fts_schema%%.%s;",
+      GetFTSTermsStorageTable(), GetFTSTermsStorageTable());
+}
+
 static string LayeredAffectedTermIdsSubquery(const string &token_ctes) {
   // clang-format off
 	return token_ctes + R"(
@@ -1648,6 +1686,184 @@ static string InsertTriggerScript(const QualifiedName &qname,
   return result;
 }
 
+static string ClusteredInsertTriggerScript(const QualifiedName &qname,
+                                           const string &input_id,
+                                           const vector<string> &input_values) {
+  // clang-format off
+	string docs_new_docs_cte = R"(
+        fts_new_docs AS (
+            SELECT COALESCE((SELECT max(docid) + 1 FROM %fts_schema%.docs), 0)
+                       + row_number() OVER (ORDER BY fts_new_rows.%input_id%) - 1 AS docid,
+                   fts_new_rows.%input_id% AS name,
+                   %input_value_select_list%
+            FROM fts_new_rows
+        )
+    )";
+
+	string token_new_docs_cte = R"(
+        fts_new_docs AS (
+            SELECT (SELECT max(docid) - (SELECT count(*) FROM fts_new_rows) + 1 FROM %fts_schema%.docs)
+                       + row_number() OVER (ORDER BY fts_new_rows.%input_id%) - 1 AS docid,
+                   fts_new_rows.%input_id% AS name,
+                   %input_value_select_list%
+            FROM fts_new_rows
+        )
+    )";
+
+	string tokenize_field_query = R"(
+        SELECT unnest(%fts_schema%.tokenize(fts_ii.%input_value%)) AS w,
+               fts_ii.docid AS docid,
+               (SELECT fieldid FROM %fts_schema%.fields WHERE field = %input_value_string%) AS fieldid
+        FROM fts_new_docs AS fts_ii
+    )";
+
+	string token_ctes = R"(
+        WITH %new_docs_cte%,
+        tokenized AS (
+            %union_fields_query%
+        ),
+        stemmed_stopped AS (
+            SELECT stem(t.w, '%stemmer%') AS term,
+                   t.docid AS docid,
+                   t.fieldid AS fieldid
+            FROM tokenized AS t
+            WHERE t.w NOT NULL
+              AND t.w <> ''
+              AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+        )
+    )";
+
+	string result = R"(
+        CREATE TRIGGER %trigger_00_docs% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.docs (docid, name, len)
+            WITH %docs_new_docs_cte%,
+            tokenized AS (
+                %union_fields_query%
+            ),
+            stemmed_stopped AS (
+                SELECT stem(t.w, '%stemmer%') AS term,
+                       t.docid AS docid,
+                       t.fieldid AS fieldid
+                FROM tokenized AS t
+                WHERE t.w NOT NULL
+                  AND t.w <> ''
+                  AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
+            ),
+            lengths AS (
+                SELECT docid, count(term) AS len
+                FROM stemmed_stopped
+                GROUP BY docid
+            )
+            SELECT nd.docid,
+                   nd.name,
+                   COALESCE(l.len, 0) AS len
+            FROM fts_new_docs AS nd
+            LEFT JOIN lengths AS l ON nd.docid = l.docid;
+
+        CREATE TRIGGER %trigger_10_dict_insert% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.dict (termid, term, df)
+            %token_ctes%,
+            new_terms AS (
+                SELECT DISTINCT term
+                FROM stemmed_stopped
+                WHERE term NOT IN (SELECT term FROM %fts_schema%.dict)
+                ORDER BY term
+            )
+            SELECT (SELECT COALESCE(max(termid) + 1, 0) FROM %fts_schema%.dict) + row_number() OVER () - 1 AS termid,
+                   term,
+                   0 AS df
+            FROM new_terms;
+
+        CREATE TRIGGER %trigger_20_terms_store% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            INSERT INTO %fts_schema%.%terms_storage_table% (termid, docid, fieldid)
+            %token_ctes%
+            SELECT d.termid,
+                   ss.docid,
+                   ss.fieldid
+            FROM stemmed_stopped AS ss
+            JOIN %fts_schema%.dict AS d ON ss.term = d.term;
+
+        CREATE TRIGGER %trigger_30_dict_df% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.dict AS d
+            SET df = d.df + inserted_df_delta.df_delta
+            FROM (
+                SELECT t.termid,
+                       COUNT(DISTINCT t.docid) AS df_delta
+                FROM %fts_schema%.%terms_storage_table% AS t
+                JOIN %fts_schema%.docs AS docs ON t.docid = docs.docid
+                JOIN fts_new_rows AS new_rows ON docs.name = new_rows.%input_id%
+                GROUP BY t.termid
+            ) AS inserted_df_delta
+            WHERE d.termid = inserted_df_delta.termid;
+
+        CREATE TRIGGER %trigger_40_stats% AFTER INSERT ON %input_table%
+        REFERENCING NEW TABLE AS fts_new_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.stats
+            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
+                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
+    )";
+  // clang-format on
+
+  vector<string> input_value_selects;
+  vector<string> tokenize_fields;
+  for (auto &input_value : input_values) {
+    input_value_selects.push_back(StringUtil::Format(
+        "fts_new_rows.%s AS %s", SQLIdentifier::ToString(input_value),
+        SQLIdentifier::ToString(input_value)));
+    auto query = StringUtil::Replace(tokenize_field_query, "%input_value%",
+                                     SQLIdentifier::ToString(input_value));
+    query = StringUtil::Replace(query, "%input_value_string%",
+                                SQLString::ToString(input_value));
+    tokenize_fields.push_back(query);
+  }
+
+  docs_new_docs_cte = StringUtil::Replace(
+      docs_new_docs_cte, "%input_value_select_list%",
+      StringUtil::Join(input_value_selects, ",\n                   "));
+  token_new_docs_cte = StringUtil::Replace(
+      token_new_docs_cte, "%input_value_select_list%",
+      StringUtil::Join(input_value_selects, ",\n                   "));
+  token_ctes =
+      StringUtil::Replace(token_ctes, "%new_docs_cte%", token_new_docs_cte);
+  token_ctes =
+      StringUtil::Replace(token_ctes, "%union_fields_query%",
+                          StringUtil::Join(tokenize_fields, " UNION ALL "));
+  result =
+      StringUtil::Replace(result, "%docs_new_docs_cte%", docs_new_docs_cte);
+  result =
+      StringUtil::Replace(result, "%union_fields_query%",
+                          StringUtil::Join(tokenize_fields, " UNION ALL "));
+  result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
+  result = StringUtil::Replace(result, "%terms_storage_table%",
+                               GetFTSTermsStorageTable());
+
+  auto trigger_names = GetFTSClusteredInsertTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_00_docs%",
+                               SQLIdentifier::ToString(trigger_names[0]));
+  result = StringUtil::Replace(result, "%trigger_10_dict_insert%",
+                               SQLIdentifier::ToString(trigger_names[1]));
+  result = StringUtil::Replace(result, "%trigger_20_terms_store%",
+                               SQLIdentifier::ToString(trigger_names[2]));
+  result = StringUtil::Replace(result, "%trigger_30_dict_df%",
+                               SQLIdentifier::ToString(trigger_names[3]));
+  result = StringUtil::Replace(result, "%trigger_40_stats%",
+                               SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
+  return result;
+}
+
 static string DeleteTriggerScript(const QualifiedName &qname,
                                   const string &input_id,
                                   const vector<string> &input_values,
@@ -1759,6 +1975,76 @@ static string DeleteTriggerScript(const QualifiedName &qname,
   return result;
 }
 
+static string ClusteredDeleteTriggerScript(const QualifiedName &qname,
+                                           const string &input_id) {
+  // clang-format off
+	string result = R"(
+        CREATE TRIGGER %trigger_00_dict_df% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.dict AS d
+            SET df = d.df - deleted_df_delta.df_delta
+            FROM (
+                SELECT t.termid,
+                       COUNT(DISTINCT t.docid) AS df_delta
+                FROM %fts_schema%.%terms_storage_table% AS t
+                JOIN %fts_schema%.docs AS docs ON t.docid = docs.docid
+                JOIN fts_old_rows AS old_rows ON docs.name = old_rows.%input_id%
+                GROUP BY t.termid
+            ) AS deleted_df_delta
+            WHERE d.termid = deleted_df_delta.termid;
+
+        CREATE TRIGGER %trigger_10_terms_store% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.%terms_storage_table%
+            WHERE docid IN (
+                SELECT d.docid
+                FROM %fts_schema%.docs AS d
+                JOIN fts_old_rows AS old_rows ON d.name = old_rows.%input_id%
+            );
+
+        CREATE TRIGGER %trigger_20_docs% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.docs
+            WHERE name IN (SELECT %input_id% FROM fts_old_rows);
+
+        CREATE TRIGGER %trigger_30_dict_prune% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            DELETE FROM %fts_schema%.dict
+            WHERE df = 0;
+
+        CREATE TRIGGER %trigger_40_stats% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            UPDATE %fts_schema%.stats
+            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
+                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
+    )";
+  // clang-format on
+
+  auto trigger_names = GetFTSClusteredDeleteTriggerNames(qname);
+  result = StringUtil::Replace(result, "%trigger_00_dict_df%",
+                               SQLIdentifier::ToString(trigger_names[0]));
+  result = StringUtil::Replace(result, "%trigger_10_terms_store%",
+                               SQLIdentifier::ToString(trigger_names[1]));
+  result = StringUtil::Replace(result, "%trigger_20_docs%",
+                               SQLIdentifier::ToString(trigger_names[2]));
+  result = StringUtil::Replace(result, "%trigger_30_dict_prune%",
+                               SQLIdentifier::ToString(trigger_names[3]));
+  result = StringUtil::Replace(result, "%trigger_40_stats%",
+                               SQLIdentifier::ToString(trigger_names[4]));
+  result = StringUtil::Replace(result, "%terms_storage_table%",
+                               GetFTSTermsStorageTable());
+  result = StringUtil::Replace(result, "%input_table%",
+                               GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%input_id%",
+                               SQLIdentifier::ToString(input_id));
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Coordinator: assembles all parts and substitutes cross-cutting placeholders
 // ---------------------------------------------------------------------------
@@ -1788,10 +2074,21 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   }
   if (incremental) {
     result += IncrementalIndexSetupScript(qname);
-    result +=
-        InsertTriggerScript(qname, input_id, input_values, layered_search);
-    result +=
-        DeleteTriggerScript(qname, input_id, input_values, layered_search);
+    if (layered_search) {
+      result +=
+          InsertTriggerScript(qname, input_id, input_values, layered_search);
+      result +=
+          DeleteTriggerScript(qname, input_id, input_values, layered_search);
+    } else if (cluster_terms) {
+      result += ClusteredIncrementalIndexSetupScript();
+      result += ClusteredInsertTriggerScript(qname, input_id, input_values);
+      result += ClusteredDeleteTriggerScript(qname, input_id);
+    } else {
+      result +=
+          InsertTriggerScript(qname, input_id, input_values, layered_search);
+      result +=
+          DeleteTriggerScript(qname, input_id, input_values, layered_search);
+    }
   }
 
   string fts_schema = GetFTSSchema(qname);
@@ -1922,11 +2219,6 @@ string FTSIndexing::CreateFTSIndexQuery(ClientContext &context,
     throw InvalidInputException("incremental FTS indexes require the document "
                                 "id column to be NOT NULL");
   }
-  if (incremental && cluster_terms && !layered_search) {
-    throw InvalidInputException("cluster_terms cannot be combined with "
-                                "incremental FTS indexes");
-  }
-
   return IndexingScript(context, qname, doc_id, doc_values, stemmer, stopwords,
                         ignore, strip_accents, lower, incremental,
                         cluster_terms, layered_search);
