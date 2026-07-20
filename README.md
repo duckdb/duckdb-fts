@@ -81,7 +81,9 @@ with `overwrite = true` performs the same cleanup before building the new index.
 ### `match_bm25` Function
 
 ```python
-match_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, conjunctive := 0)
+match_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75,
+           conjunctive := 0, field_weights := NULL, field_mode := 'sum',
+           tie_breaker := 0.0)
 ```
 
 When an index is built, this retrieval macro is created that can be used to search the index.
@@ -94,6 +96,16 @@ When an index is built, this retrieval macro is created that can be used to sear
 | `k` | `DOUBLE` | Parameter _k<sub>1</sub>_ in the Okapi BM25 retrieval model. Defaults to `1.2` |
 | `b` | `DOUBLE` | Parameter _b_ in the Okapi BM25 retrieval model. Defaults to `0.75` |
 | `conjunctive` | `BOOLEAN` | Whether to make the query conjunctive, i.e., all query terms that remain after tokenization, stopword removal, and stemming must be present for a document to be retrieved |
+| `field_weights` | `MAP(VARCHAR, DOUBLE)` | Non-negative finite weights for indexed fields. Omitted fields have weight `1.0`. Defaults to `NULL` |
+| `field_mode` | `VARCHAR` | How field scores are combined: `sum` or `best_fields`. Defaults to `sum` |
+| `tie_breaker` | `DOUBLE` | Contribution from non-best fields in `best_fields` mode. Must be finite and between `0.0` and `1.0`. Defaults to `0.0` |
+
+Leaving all three field-scoring arguments at their defaults preserves the
+original BM25 calculation, including term-frequency and length aggregation
+across selected fields. Passing a weight map, selecting `best_fields`, or
+setting a tie breaker opts into field-aware BM25. That path calculates term
+frequency and length normalization separately for each field before combining
+the weighted field scores.
 
 ### Layered BM25 Search
 
@@ -103,14 +115,16 @@ search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2,
                     max_df := 50000, enable_prefix := true,
                     enable_substring := true, enable_fuzzy := true,
                     enable_short_fuzzy := true, expand_exact_terms := false,
-                    query_mode := 'standard')
+                    query_mode := 'standard', field_weights := NULL,
+                    field_mode := 'sum', tie_breaker := 0.0)
 
 match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2,
                    b := 0.75, term_limit := 32, max_df_ratio := 0.15,
                    max_df := 50000, enable_prefix := true,
                    enable_substring := true, enable_fuzzy := true,
                    enable_short_fuzzy := true, expand_exact_terms := false,
-                   query_mode := 'standard')
+                   query_mode := 'standard', field_weights := NULL,
+                   field_mode := 'sum', tie_breaker := 0.0)
 ```
 
 When `layered_search` is enabled, the extension builds dictionary sidecar
@@ -142,6 +156,9 @@ filtering, and BM25 parameters as the base FTS index.
 | `enable_short_fuzzy` | `BOOLEAN` | Whether to use a length-clustered path for short fuzzy alternatives. Defaults to `true` |
 | `expand_exact_terms` | `BOOLEAN` | Whether to also expand a query term that already has an exact dictionary match. Defaults to `false` |
 | `query_mode` | `VARCHAR` | Query execution mode. `standard` uses exact, prefix, substring, and fuzzy dictionary expansion. `autocomplete` keeps preceding tokens exact and matches the final token by raw-token prefix. Defaults to `standard` |
+| `field_weights` | `MAP(VARCHAR, DOUBLE)` | Non-negative finite weights for indexed fields. Omitted fields have weight `1.0`. Defaults to `NULL` |
+| `field_mode` | `VARCHAR` | How field scores are combined: `sum` or `best_fields`. Defaults to `sum` |
+| `tie_breaker` | `DOUBLE` | Contribution from non-best fields in `best_fields` mode. Must be finite and between `0.0` and `1.0`. Defaults to `0.0` |
 
 <!-- markdownlint-enable MD056 -->
 
@@ -150,6 +167,12 @@ fuzzy alternatives are optional and receive lower expansion weights before BM25
 scoring. Numeric query terms are searched exactly and are excluded from
 trigram/fuzzy expansion. Stopwords are removed before both exact matching and
 expansion, so a query containing only stopwords returns no rows.
+
+In `sum` mode, field-aware scoring adds every weighted field score. In
+`best_fields` mode it uses `max(field_score) + tie_breaker * (sum(field_score) -
+max(field_score))`. Field weights apply after each field's local BM25
+normalization, while IDF remains corpus-wide. Unknown fields and invalid modes,
+weights, or tie breakers produce an error.
 
 Autocomplete mode requires a final searchable token of at least two characters.
 It routes that token through a compact two/three-character prefix table and
@@ -163,6 +186,11 @@ Layered search can be static or incremental. With `layered_search = true` and
 changes are not visible until the index is rebuilt. With both options enabled,
 the sidecar tables are maintained together with the base FTS index for
 `INSERT` and `DELETE`.
+
+Indexes store a compact field-length list on each document row and corpus
+average lengths in the statistics row. Existing indexes created by an older
+extension version must be dropped and rebuilt before field-aware scoring can be
+used.
 
 ### `stem` Function
 
@@ -311,6 +339,23 @@ SELECT docname, score, rank
 FROM fts_main_animal_sounds.search_layered_bm25(
     'quack',
     fields := 'text_content',
+    top_k := 10
+);
+```
+
+Weight fields independently, or prefer the strongest matching field while
+retaining a fraction of the remaining field scores:
+
+```sql
+SELECT docname, score, rank
+FROM fts_main_animal_sounds.search_layered_bm25(
+    'mark',
+    field_weights := MAP {
+        'author': 4.0,
+        'text_content': 1.0
+    },
+    field_mode := 'best_fields',
+    tie_breaker := 0.1,
     top_k := 10
 );
 ```

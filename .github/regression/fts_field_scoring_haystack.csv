@@ -1,0 +1,2 @@
+benchmark/fts/layered_autocomplete/haystack/field_weighted_sum.benchmark
+benchmark/fts/layered_autocomplete/haystack/field_best_fields.benchmark

@@ -1,0 +1,5 @@
+template benchmark/fts/layered_autocomplete/templates/field_scoring.benchmark.in
+display_name=FTS layered weighted field sum (50K)
+rows=50000
+field_mode=sum
+tie_breaker=0.0
