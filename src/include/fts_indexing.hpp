@@ -17,6 +17,9 @@ struct FTSIndexing {
                                   const FunctionParameters &parameters);
   static string CreateFTSIndexQuery(ClientContext &context,
                                     const FunctionParameters &parameters);
+  static string
+  CreateFTSBooleanQueryMacrosQuery(ClientContext &context,
+                                   const FunctionParameters &parameters);
 };
 
 } // namespace duckdb

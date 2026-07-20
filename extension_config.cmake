@@ -5,6 +5,7 @@ if (LINK_FTS_STATICALLY)
 endif()
 
 duckdb_extension_load(icu)
+duckdb_extension_load(json)
 
 # Extension from this repo
 duckdb_extension_load(fts

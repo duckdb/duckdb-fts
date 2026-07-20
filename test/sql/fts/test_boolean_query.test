@@ -1,0 +1,708 @@
+# name: test/sql/fts/test_boolean_query.test
+# description: Structured nested Boolean queries for layered BM25 search
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require json
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE boolean_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO boolean_docs VALUES
+    ('d1', 'alpha', 'beta gamma'),
+    ('d2', 'alpha beta', 'delta'),
+    ('d3', 'beta', 'gamma delta'),
+    ('d4', 'alphabet', 'epsilon'),
+    ('d5', 'omega', 'excluded alpha')
+
+statement ok
+PRAGMA create_fts_index('boolean_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', ignore='(\\.|[^a-z0-9])+', layered_search=true)
+
+# A leaf can be the root query.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+d5
+
+# All must clauses must match and any must_not match excludes the document.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"query":"alpha"},{"query":"gamma"}],"must_not":[{"query":"excluded"}]}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+
+# A should-only group defaults to one required clause.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"should":[{"query":"alpha"},{"query":"beta"}]}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+d3
+d5
+
+# Should clauses default to optional when the group also has a must clause.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"query":"alpha"}],"should":[{"query":"gamma"}]}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+d5
+
+query I
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"query":"alpha"}],"should":[{"query":"gamma"}],"minimum_should_match":1}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+
+# minimum_should_match counts direct should clauses.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"should":[{"query":"alpha"},{"query":"beta"}],"minimum_should_match":2}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+
+# Duplicate clauses remain distinct Boolean children.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"should":[{"query":"alpha"},{"query":"alpha"}],"minimum_should_match":2}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+d5
+
+# An explicitly optional should-only group matches the document universe.
+query II rowsort
+SELECT docname, score
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"should":[{"query":"missing"}],"minimum_should_match":0}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1	0.0
+d2	0.0
+d3	0.0
+d4	0.0
+d5	0.0
+
+# Nested groups are clauses in their parent and can have their own threshold.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"query":"alpha"},{"should":[{"query":"gamma"},{"query":"delta"}],"minimum_should_match":1}]}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+
+# A nested exclusion can invalidate a parent match after the parent was first evaluated.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"query":"alpha"}],"must_not":[{"must":[{"query":"excluded"}]}]}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+
+# A later nested positive result replaces, rather than duplicates, a partial parent score.
+query I
+WITH flat_score AS (
+    SELECT score
+    FROM fts_main_boolean_docs.search_layered_bm25_query(
+        '{"should":[{"query":"alpha"},{"query":"beta"}],"minimum_should_match":2}'::JSON,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+    WHERE docname = 'd2'
+),
+nested_score AS (
+    SELECT score
+    FROM fts_main_boolean_docs.search_layered_bm25_query(
+        '{"should":[{"query":"alpha"},{"must":[{"query":"beta"}]}],"minimum_should_match":2}'::JSON,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+    WHERE docname = 'd2'
+)
+SELECT abs(flat_score.score - nested_score.score) < 1e-12
+FROM flat_score, nested_score
+----
+true
+
+# Universe-seeded groups still observe exclusions that resolve in a later iteration.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"should":[{"query":"missing"}],"must_not":[{"must":[{"query":"excluded"}]}],"minimum_should_match":0}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+d3
+d4
+
+# Leaf boosts are applied before the enclosing group boost.
+query I
+WITH alpha_score AS (
+    SELECT score
+    FROM fts_main_boolean_docs.search_layered_bm25(
+        'alpha',
+        top_k := NULL,
+        b := 0.6,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'bm25f',
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+    WHERE docname = 'd2'
+),
+beta_score AS (
+    SELECT score
+    FROM fts_main_boolean_docs.search_layered_bm25(
+        'beta',
+        top_k := NULL,
+        b := 0.6,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'bm25f',
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+    WHERE docname = 'd2'
+),
+boolean_score AS (
+    SELECT score
+    FROM fts_main_boolean_docs.search_layered_bm25_query(
+        '{"should":[{"query":"alpha","boost":2},{"query":"beta","boost":3}],"minimum_should_match":2,"boost":4}'::JSON,
+        b := 0.6,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'bm25f',
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+    WHERE docname = 'd2'
+)
+SELECT abs(boolean_score.score - 4 * (2 * alpha_score.score + 3 * beta_score.score)) < 1e-12
+FROM alpha_score, beta_score, boolean_score
+----
+true
+
+# Fields and query mode are configured per leaf.
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha","fields":["title"]}'::JSON,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+
+query I rowsort
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha","fields":["title"]}'::JSON,
+    field_weights := MAP {'title': 2.0},
+    field_b := MAP {'title': 0.4},
+    scoring_model := 'best_fields',
+    tie_breaker := 0.1,
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d1
+d2
+
+# A root leaf delegates canonical BM25F scoring to the ordinary layered macro.
+query I
+WITH direct_hits AS (
+    SELECT docname, score
+    FROM fts_main_boolean_docs.search_layered_bm25(
+        'alpha beta',
+        top_k := NULL,
+        b := 0.6,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'bm25f',
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+),
+structured_hits AS (
+    SELECT docname, score
+    FROM fts_main_boolean_docs.search_layered_bm25_query(
+        '{"query":"alpha beta"}'::JSON,
+        top_k := NULL,
+        b := 0.6,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'bm25f',
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+)
+SELECT count(*)
+FROM direct_hits
+FULL OUTER JOIN structured_hits USING (docname)
+WHERE direct_hits.score IS DISTINCT FROM structured_hits.score
+----
+0
+
+# The alternative best-fields model is delegated without changing its scores.
+query I
+WITH direct_hits AS (
+    SELECT docname, score
+    FROM fts_main_boolean_docs.search_layered_bm25(
+        'alpha beta',
+        top_k := NULL,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'best_fields',
+        tie_breaker := 0.1,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+),
+structured_hits AS (
+    SELECT docname, score
+    FROM fts_main_boolean_docs.search_layered_bm25_query(
+        '{"query":"alpha beta"}'::JSON,
+        top_k := NULL,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'best_fields',
+        tie_breaker := 0.1,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+)
+SELECT count(*)
+FROM direct_hits
+FULL OUTER JOIN structured_hits USING (docname)
+WHERE direct_hits.score IS DISTINCT FROM structured_hits.score
+----
+0
+
+query I
+SELECT docname
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alphab","fields":["title"],"query_mode":"autocomplete"}'::JSON,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+d4
+
+# The scalar and table forms agree on every input row.
+query I
+WITH table_hits AS (
+    SELECT docname, score
+    FROM fts_main_boolean_docs.search_layered_bm25_query(
+        '{"must":[{"query":"alpha"}],"must_not":[{"query":"excluded"}]}'::JSON,
+        b := 0.6,
+        field_weights := MAP {'title': 2.0, 'body': 0.5},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        scoring_model := 'best_fields',
+        tie_breaker := 0.1,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+),
+scalar_hits AS (
+    SELECT id AS docname,
+           fts_main_boolean_docs.match_layered_bm25_query(
+               id,
+               '{"must":[{"query":"alpha"}],"must_not":[{"query":"excluded"}]}'::JSON,
+               b := 0.6,
+               field_weights := MAP {'title': 2.0, 'body': 0.5},
+               field_b := MAP {'title': 0.2, 'body': 0.9},
+               scoring_model := 'best_fields',
+               tie_breaker := 0.1,
+               enable_prefix := false,
+               enable_substring := false,
+               enable_fuzzy := false,
+               enable_short_fuzzy := false
+           ) AS score
+    FROM boolean_docs
+)
+SELECT count(*)
+FROM scalar_hits
+FULL OUTER JOIN table_hits USING (docname)
+WHERE scalar_hits.score IS DISTINCT FROM table_hits.score
+----
+0
+
+# The installer applies only to indexes with layered sidecar tables.
+statement ok
+CREATE TABLE plain_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO plain_docs VALUES ('plain', 'alpha')
+
+statement ok
+PRAGMA create_fts_index('plain_docs', 'id', 'body', stemmer='none', stopwords='none')
+
+statement error
+PRAGMA create_fts_boolean_query_macros('plain_docs')
+----
+create_fts_boolean_query_macros requires an FTS index created with layered_search=true
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    scoring_model := 'invalid'
+)
+----
+scoring_model must be either bm25f or best_fields
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    field_weights := MAP {'missing': 1.0}
+)
+----
+field_weights contains unknown field: missing
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    field_b := MAP {'title': 1.1}
+)
+----
+field b for title must be finite and between 0 and 1
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    field_b := MAP {'missing': 0.5}
+)
+----
+field_b contains unknown field: missing
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    scoring_model := 'bm25f',
+    tie_breaker := 0.1
+)
+----
+tie_breaker is only supported with best_fields scoring
+
+# Invalid query trees fail before returning search results.
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query(NULL)
+----
+query must be a non-null JSON object
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('[]'::JSON)
+----
+query must be a non-null JSON object
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{}'::JSON)
+----
+Boolean group must contain at least one must or should clause
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"must_not":[{"query":"alpha"}]}'::JSON)
+----
+Boolean group must contain at least one must or should clause
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","must":[]}'::JSON)
+----
+query node cannot contain both query and Boolean clauses
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":42}'::JSON)
+----
+query leaf must contain a string query
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","unknown":true}'::JSON)
+----
+query node contains unknown key: unknown
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","query":"beta"}'::JSON)
+----
+query node contains duplicate keys
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"must":{"query":"alpha"}}'::JSON)
+----
+must must be an array
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"must":["alpha"]}'::JSON)
+----
+must entries must be JSON objects
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","fields":[]}'::JSON)
+----
+fields must be a non-empty array of field names
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","fields":[1]}'::JSON)
+----
+fields entries must be non-empty strings without commas or surrounding whitespace
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","fields":[" title "]}'::JSON)
+----
+fields entries must be non-empty strings without commas or surrounding whitespace
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","fields":["missing"]}'::JSON)
+----
+fields contains unknown field: missing
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","query_mode":"invalid"}'::JSON)
+----
+query_mode must be either standard or autocomplete
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","boost":-1}'::JSON)
+----
+boost must be finite and non-negative
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"query":"alpha","boost":"high"}'::JSON)
+----
+boost must be finite and non-negative
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"should":[{"query":"alpha"}],"minimum_should_match":2}'::JSON)
+----
+minimum_should_match must be a non-negative integer no greater than the number of should clauses
+
+statement error
+SELECT * FROM fts_main_boolean_docs.search_layered_bm25_query('{"should":[{"query":"alpha"}],"minimum_should_match":0.5}'::JSON)
+----
+minimum_should_match must be a non-negative integer no greater than the number of should clauses
+
+# The default leaf limit is deliberately larger than the original fixed boundary.
+query I
+SELECT count(*)
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    json_object(
+        'should',
+        list_transform(range(65), lambda ignored: json_object('query', 'alpha'))
+    )
+)
+----
+3
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    json_object(
+        'should',
+        list_transform(range(65), lambda ignored: json_object('query', 'alpha'))
+    ),
+    max_leaf_clauses := 64
+)
+----
+query exceeds max_leaf_clauses of 64
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    json_object(
+        'should',
+        list_transform(range(1025), lambda ignored: json_object('query', 'alpha'))
+    )
+)
+----
+query exceeds max_leaf_clauses of 1024
+
+# The scalar API forwards the same caller-controlled resource policy.
+statement error
+SELECT fts_main_boolean_docs.match_layered_bm25_query(
+    'd1',
+    json_object(
+        'should',
+        list_transform(range(2), lambda ignored: json_object('query', 'alpha'))
+    ),
+    max_leaf_clauses := 1
+)
+----
+query exceeds max_leaf_clauses of 1
+
+# The recursive reducer is not tied to the original eight generated CTE levels.
+query I
+SELECT count(*)
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"query":"alpha"}]}]}]}]}]}]}]}]}]}'::JSON
+)
+----
+3
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"query":"alpha"}]}]}]}]}]}]}]}]}]}'::JSON,
+    max_boolean_depth := 8
+)
+----
+query exceeds max_boolean_depth of 8
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"query":"alpha"}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}'::JSON
+)
+----
+query exceeds max_boolean_depth of 64
+
+query I
+SELECT count(*)
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"must":[{"query":"alpha"}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}'::JSON,
+    max_boolean_depth := 100
+)
+----
+3
+
+# NULL disables either caller-controlled limit.
+query I
+SELECT count(*)
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    max_leaf_clauses := NULL,
+    max_boolean_depth := NULL
+)
+----
+3
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    max_leaf_clauses := 0
+)
+----
+max_leaf_clauses must be NULL or a positive integer
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    max_boolean_depth := -1
+)
+----
+max_boolean_depth must be NULL or a positive integer
+
+statement error
+SELECT *
+FROM fts_main_boolean_docs.search_layered_bm25_query(
+    '{"query":"alpha"}'::JSON,
+    max_boolean_depth := 1.5
+)
+----
+max_boolean_depth must be NULL or a positive integer

@@ -235,10 +235,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 
   auto drop_fts_index_func = PragmaFunction::PragmaCall(
       "drop_fts_index", FTSIndexing::DropFTSIndexQuery, {LogicalType::VARCHAR});
+  auto create_fts_boolean_query_macros_func = PragmaFunction::PragmaCall(
+      "create_fts_boolean_query_macros",
+      FTSIndexing::CreateFTSBooleanQueryMacrosQuery, {LogicalType::VARCHAR});
 
   loader.RegisterFunction(stem_func);
   loader.RegisterFunction(opensearch_standard_tokenize_func);
   loader.RegisterFunction(create_fts_index_func);
+  loader.RegisterFunction(create_fts_boolean_query_macros_func);
   loader.RegisterFunction(drop_fts_index_func);
 }
 
