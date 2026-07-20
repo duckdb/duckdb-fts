@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/boolean_query.benchmark.in
+display_name=FTS nested Boolean query (1M)
+rows=1000000
+query_json={"must":[{"query":"northstar","fields":["body"]},{"should":[{"query":"prefixalpha","fields":["body"]},{"query":"prefixbeta","fields":["body"]}]}]}
