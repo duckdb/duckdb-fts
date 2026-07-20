@@ -2,3 +2,4 @@ template benchmark/fts/layered_autocomplete/templates/layered_match.benchmark.in
 display_name=FTS layered scalar match (50K)
 rows=50000
 query_string=northstar
+match_macro=match_layered_bm25

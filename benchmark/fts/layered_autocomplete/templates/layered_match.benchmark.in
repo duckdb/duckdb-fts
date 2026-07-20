@@ -26,7 +26,7 @@ PRAGMA create_fts_index('documents', 'id', 'title', 'body', stemmer='porter', st
 assert I
 SELECT count(*) > 0
 FROM (
-    SELECT fts_main_documents.match_layered_bm25(id, '${query_string}', fields := 'body') AS score
+    SELECT fts_main_documents.${match_macro}(id, '${query_string}', fields := 'body') AS score
     FROM documents
 ) AS scored
 WHERE score IS NOT NULL
@@ -37,7 +37,7 @@ run
 SELECT id, score
 FROM (
     SELECT id,
-           fts_main_documents.match_layered_bm25(id, '${query_string}', fields := 'body') AS score
+           fts_main_documents.${match_macro}(id, '${query_string}', fields := 'body') AS score
     FROM documents
 ) AS scored
 WHERE score IS NOT NULL
