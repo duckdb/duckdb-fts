@@ -590,24 +590,46 @@ static string LayeredSidecarScript(const QualifiedName &qname) {
   return result;
 }
 
-static string FieldScoringValidationCTEs() {
+static string FieldScoringConfigCTEs() {
   // clang-format off
 	return R"(
+            requested_fields AS (
+                SELECT trim(field_name) AS field
+                FROM (
+                    SELECT unnest(string_split(fields, ',')) AS field_name
+                ) AS split_fields
+                WHERE trim(field_name) <> ''
+            ),
             weight_entries AS (
                 SELECT unnest(map_entries(params.field_weights), recursive := true)
                 FROM params
             ),
-            validation_errors AS (
-                SELECT 'field_mode must be either sum or best_fields' AS message
+            field_b_entries AS (
+                SELECT unnest(map_entries(params.field_b), recursive := true)
                 FROM params
-                WHERE field_mode IS NULL
-                   OR field_mode NOT IN ('sum', 'best_fields')
+            ),
+            validation_errors AS (
+                SELECT 'scoring_model must be either bm25f or best_fields' AS message
+                FROM params
+                WHERE scoring_model IS NULL
+                   OR scoring_model NOT IN ('bm25f', 'best_fields')
                 UNION ALL
                 SELECT 'tie_breaker must be finite and between 0 and 1' AS message
                 FROM params
                 WHERE tie_breaker IS NULL
                    OR NOT isfinite(tie_breaker)
                    OR tie_breaker NOT BETWEEN 0.0 AND 1.0
+                UNION ALL
+                SELECT 'tie_breaker is only supported with best_fields scoring' AS message
+                FROM params
+                WHERE scoring_model = 'bm25f'
+                  AND tie_breaker <> 0.0
+                UNION ALL
+                SELECT 'b must be finite and between 0 and 1' AS message
+                FROM params
+                WHERE default_b IS NULL
+                   OR NOT isfinite(default_b)
+                   OR default_b NOT BETWEEN 0.0 AND 1.0
                 UNION ALL
                 SELECT 'field weight for ' || key || ' must be finite and non-negative' AS message
                 FROM weight_entries
@@ -618,7 +640,130 @@ static string FieldScoringValidationCTEs() {
                 SELECT 'field_weights contains unknown field: ' || key AS message
                 FROM weight_entries
                 WHERE key NOT IN (SELECT field FROM %fts_schema%.fields)
+                UNION ALL
+                SELECT 'field b for ' || key || ' must be finite and between 0 and 1' AS message
+                FROM field_b_entries
+                WHERE value IS NULL
+                   OR NOT isfinite(value)
+                   OR value NOT BETWEEN 0.0 AND 1.0
+                UNION ALL
+                SELECT 'field_b contains unknown field: ' || key AS message
+                FROM field_b_entries
+                WHERE key NOT IN (SELECT field FROM %fts_schema%.fields)
             ),
+            field_config AS (
+                SELECT fts_fields.fieldid,
+                       coalesce(
+                           map_extract_value(params.field_weights, fts_fields.field),
+                           1.0
+                       )::DOUBLE AS field_weight,
+                       coalesce(
+                           map_extract_value(params.field_b, fts_fields.field),
+                           params.default_b
+                       )::DOUBLE AS field_b
+                FROM %fts_schema%.fields AS fts_fields
+                CROSS JOIN params
+                WHERE CASE WHEN fields IS NULL THEN true ELSE fts_fields.field IN (
+                    SELECT requested_fields.field
+                    FROM requested_fields
+                ) END
+            ),
+    )";
+  // clang-format on
+}
+
+static string FieldScoringScoreCTEs() {
+  // clang-format off
+	return R"(
+            normalized_field_terms AS (
+                SELECT field_term_tf.docid,
+                       field_term_tf.termid,
+                       field_term_tf.rawtermid,
+                       field_term_tf.fieldid,
+                       field_term_tf.df,
+                       field_term_tf.expansion_weight,
+                       field_config.field_weight,
+                       field_term_tf.tf / (
+                           (1.0 - field_config.field_b)
+                           + field_config.field_b * (
+                               list_extract(docs.field_lens, field_term_tf.fieldid + 1)
+                               / list_extract(stats.avg_field_lens, field_term_tf.fieldid + 1)
+                           )
+                       ) AS normalized_tf
+                FROM field_term_tf
+                JOIN %fts_schema%.docs AS docs
+                  ON docs.docid = field_term_tf.docid
+                JOIN field_config
+                  ON field_config.fieldid = field_term_tf.fieldid
+                CROSS JOIN %fts_schema%.stats AS stats
+            ),
+            bm25f_term_frequencies AS (
+                SELECT docid,
+                       termid,
+                       rawtermid,
+                       any_value(df) AS df,
+                       max(expansion_weight) AS expansion_weight,
+                       sum(field_weight * normalized_tf) AS pseudo_tf
+                FROM normalized_field_terms
+                GROUP BY docid,
+                         termid,
+                         rawtermid
+            ),
+            bm25f_scores AS (
+                SELECT bm25f_term_frequencies.docid,
+                       sum(
+                           expansion_weight
+                           * log(((((stats.num_docs - df) + 0.5) / (df + 0.5)) + 1))
+                           * (
+                               (pseudo_tf * (k + 1))
+                               / (pseudo_tf + k)
+                           )
+                       ) AS score
+                FROM bm25f_term_frequencies
+                CROSS JOIN %fts_schema%.stats AS stats
+                GROUP BY bm25f_term_frequencies.docid
+            ),
+            best_field_term_scores AS (
+                SELECT docid,
+                       fieldid,
+                       field_weight,
+                       expansion_weight
+                       * log(((((stats.num_docs - df) + 0.5) / (df + 0.5)) + 1))
+                       * (
+                           (normalized_tf * (k + 1))
+                           / (normalized_tf + k)
+                       ) AS term_score
+                FROM normalized_field_terms
+                CROSS JOIN %fts_schema%.stats AS stats
+            ),
+            per_field_scores AS (
+                SELECT docid,
+                       fieldid,
+                       max(field_weight) * sum(term_score) AS field_score
+                FROM best_field_term_scores
+                GROUP BY docid,
+                         fieldid
+            ),
+            best_field_scores AS (
+                SELECT per_field_scores.docid,
+                       max(field_score)
+                           + params.tie_breaker * (sum(field_score) - max(field_score)) AS score
+                FROM per_field_scores
+                CROSS JOIN params
+                GROUP BY per_field_scores.docid,
+                         params.tie_breaker
+            ),
+            scores AS (
+                SELECT bm25f_scores.*
+                FROM bm25f_scores
+                CROSS JOIN params
+                WHERE params.scoring_model = 'bm25f'
+                UNION ALL
+                SELECT best_field_scores.*
+                FROM best_field_scores
+                CROSS JOIN params
+                WHERE params.scoring_model = 'best_fields'
+            )
     )";
   // clang-format on
 }
@@ -626,16 +771,15 @@ static string FieldScoringValidationCTEs() {
 static string MatchMacroScript() {
   // clang-format off
 	string result = R"(
-        CREATE MACRO %fts_schema%.match_bm25(docname, query_string, fields := NULL, k := 1.2, b := 0.75, conjunctive := false, field_weights := NULL, field_mode := 'sum', tie_breaker := 0.0) AS (
-            WITH params AS (
-                SELECT field_weights::MAP(VARCHAR, DOUBLE) AS field_weights,
-                       lower(field_mode::VARCHAR) AS field_mode,
-                       tie_breaker::DOUBLE AS tie_breaker,
-                       field_weights IS NULL
-                           AND lower(field_mode::VARCHAR) = 'sum'
-                           AND tie_breaker::DOUBLE = 0.0 AS compatibility_mode
-            ),
-            %field_scoring_validation_ctes%
+		CREATE MACRO %fts_schema%.match_bm25(docname, query_string, fields := NULL, k := 1.2, b := 0.75, conjunctive := false, field_weights := NULL, field_b := NULL, scoring_model := 'bm25f', tie_breaker := 0.0) AS (
+			WITH params AS (
+				SELECT field_weights::MAP(VARCHAR, DOUBLE) AS field_weights,
+				       field_b::MAP(VARCHAR, DOUBLE) AS field_b,
+				       lower(scoring_model::VARCHAR) AS scoring_model,
+				       tie_breaker::DOUBLE AS tie_breaker,
+				       b::DOUBLE AS default_b
+			),
+			%field_scoring_config_ctes%
             raw_tokens AS (
                 SELECT DISTINCT raw_token
                 FROM (
@@ -654,23 +798,6 @@ static string MatchMacroScript() {
                 WHERE t IS NOT NULL
                   AND t <> ''
             ),
-            requested_fields AS (
-                SELECT trim(field_name) AS field
-                FROM (
-                    SELECT unnest(string_split(fields, ',')) AS field_name
-                ) AS split_fields
-                WHERE trim(field_name) <> ''
-            ),
-            field_config AS (
-                SELECT fts_fields.fieldid,
-                       coalesce(
-                           map_extract_value(params.field_weights, fts_fields.field),
-                           1.0
-                       )::DOUBLE AS field_weight
-                FROM %fts_schema%.fields AS fts_fields
-                CROSS JOIN params
-                WHERE CASE WHEN fields IS NULL THEN 1 ELSE fts_fields.field IN (SELECT requested_fields.field FROM requested_fields) END
-            ),
             qtermids AS (
                 SELECT termid
                 FROM %fts_schema%.dict AS dict,
@@ -685,112 +812,33 @@ static string MatchMacroScript() {
                 WHERE fieldid IN (SELECT fieldid FROM field_config)
                   AND termid IN (SELECT qtermids.termid FROM qtermids)
             ),
-            compatibility_term_tf AS (
-                SELECT termid,
-                       docid,
-                       COUNT(*) AS tf
-                FROM qterms
-                GROUP BY docid,
-                         termid
-            ),
-            field_term_tf AS (
-                SELECT termid,
-                       docid,
-                       fieldid,
-                       count(*) AS tf
-                FROM qterms
-                GROUP BY docid,
-                         fieldid,
-                         termid
-            ),
-            cdocs AS (
-                SELECT docid
-                FROM qterms
-                GROUP BY docid
-                HAVING CASE WHEN conjunctive THEN COUNT(DISTINCT termid) = (SELECT COUNT(*) FROM tokens) ELSE 1 END
-            ),
-            compatibility_subscores AS (
-                SELECT docs.docid,
-                       len,
-                       compatibility_term_tf.termid,
-                       tf,
-                       df,
-                       (log(((SELECT num_docs FROM %fts_schema%.stats) - df + 0.5) / (df + 0.5) + 1) * ((tf * (k + 1)/(tf + k * (1 - b + b * (len / (SELECT avgdl FROM %fts_schema%.stats))))))) AS subscore
-                FROM compatibility_term_tf,
-                     cdocs,
-                     %fts_schema%.docs AS docs,
-                     %fts_schema%.dict AS dict
-                WHERE compatibility_term_tf.docid = cdocs.docid
-                  AND compatibility_term_tf.docid = docs.docid
-                  AND compatibility_term_tf.termid = dict.termid
-            ),
-            compatibility_scores AS (
-                SELECT docid,
-                       sum(subscore) AS score
-                FROM compatibility_subscores
-                GROUP BY docid
-            ),
-            field_subscores AS (
-                SELECT field_term_tf.docid,
-                       field_term_tf.fieldid,
-                       field_config.field_weight,
-                       log(((stats.num_docs - dict.df + 0.5) / (dict.df + 0.5)) + 1)
-                       * (
-                           (field_term_tf.tf * (k + 1))
-                           / (
-                               field_term_tf.tf
-                               + k * (
-                                   1 - b
-                                   + b * (
-                                       list_extract(docs.field_lens, field_term_tf.fieldid + 1)
-                                       / list_extract(stats.avg_field_lens, field_term_tf.fieldid + 1)
-                                   )
-                               )
-                           )
-                       ) AS subscore
-                FROM field_term_tf
-                JOIN cdocs ON cdocs.docid = field_term_tf.docid
-                JOIN %fts_schema%.docs AS docs ON docs.docid = field_term_tf.docid
-                JOIN %fts_schema%.dict AS dict ON dict.termid = field_term_tf.termid
-                JOIN field_config ON field_config.fieldid = field_term_tf.fieldid
-                CROSS JOIN %fts_schema%.stats AS stats
-            ),
-            per_field_scores AS (
-                SELECT docid,
-                       fieldid,
-                       max(field_weight) * sum(subscore) AS field_score
-                FROM field_subscores
-                GROUP BY docid,
-                         fieldid
-            ),
-            field_aware_scores AS (
-                SELECT per_field_scores.docid,
-                       CASE params.field_mode
-                           WHEN 'sum' THEN sum(field_score)
-                           WHEN 'best_fields' THEN max(field_score)
-                               + params.tie_breaker * (sum(field_score) - max(field_score))
-                       END AS score
-                FROM per_field_scores
-                CROSS JOIN params
-                GROUP BY per_field_scores.docid,
-                         params.field_mode,
-                         params.tie_breaker
-            ),
-            scores AS (
-                SELECT compatibility_scores.*
-                FROM compatibility_scores
-                CROSS JOIN params
-                WHERE params.compatibility_mode
-                UNION ALL
-                SELECT field_aware_scores.*
-                FROM field_aware_scores
-                CROSS JOIN params
-                WHERE NOT params.compatibility_mode
-            )
-            SELECT score
-            FROM scores,
-                 %fts_schema%.docs AS docs
-            WHERE scores.docid = docs.docid
+			cdocs AS (
+				SELECT docid
+				FROM qterms
+				GROUP BY docid
+				HAVING CASE WHEN conjunctive THEN COUNT(DISTINCT termid) = (SELECT COUNT(*) FROM tokens) ELSE 1 END
+			),
+			field_term_tf AS (
+				SELECT qterms.termid,
+				       NULL::BIGINT AS rawtermid,
+				       qterms.docid,
+				       qterms.fieldid,
+				       dict.df,
+				       1.0::DOUBLE AS expansion_weight,
+				       count(*) AS tf
+				FROM qterms
+				JOIN cdocs ON cdocs.docid = qterms.docid
+				JOIN %fts_schema%.dict AS dict ON dict.termid = qterms.termid
+				GROUP BY qterms.docid,
+				         qterms.fieldid,
+				         qterms.termid,
+				         dict.df
+			),
+			%field_scoring_score_ctes%
+			SELECT score
+			FROM scores,
+			     %fts_schema%.docs AS docs
+			WHERE scores.docid = docs.docid
               AND docs.name = docname
             UNION ALL
             SELECT error(message)::DOUBLE
@@ -798,15 +846,17 @@ static string MatchMacroScript() {
         );
     )";
   // clang-format on
-  return StringUtil::Replace(result, "%field_scoring_validation_ctes%",
-                             FieldScoringValidationCTEs());
+  result = StringUtil::Replace(result, "%field_scoring_config_ctes%",
+                               FieldScoringConfigCTEs());
+  return StringUtil::Replace(result, "%field_scoring_score_ctes%",
+                             FieldScoringScoreCTEs());
 }
 
 static string LayeredSearchTableMacroScript() {
   // clang-format off
 	string result = R"(
-		CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard', field_weights := NULL, field_mode := 'sum', tie_breaker := 0.0) AS TABLE
-			WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, enable_fuzzy, enable_short_fuzzy, expand_exact_terms, query_mode, field_weights, field_mode, tie_breaker, compatibility_mode) AS (
+			CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard', field_weights := NULL, field_b := NULL, scoring_model := 'bm25f', tie_breaker := 0.0) AS TABLE
+				WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, enable_fuzzy, enable_short_fuzzy, expand_exact_terms, query_mode, field_weights, field_b, scoring_model, tie_breaker, default_b) AS (
                 SELECT term_limit::BIGINT,
                        max_df_ratio::DOUBLE,
                        max_df::BIGINT,
@@ -819,15 +869,14 @@ static string LayeredSearchTableMacroScript() {
                            WHEN 'standard' THEN 'standard'
                            WHEN 'autocomplete' THEN 'autocomplete'
                            ELSE error('query_mode must be either standard or autocomplete')
-                       END,
-                       field_weights::MAP(VARCHAR, DOUBLE),
-                       lower(field_mode::VARCHAR),
-                       tie_breaker::DOUBLE,
-                       field_weights IS NULL
-                           AND lower(field_mode::VARCHAR) = 'sum'
-                           AND tie_breaker::DOUBLE = 0.0
-            ),
-            %field_scoring_validation_ctes%
+				       END,
+				       field_weights::MAP(VARCHAR, DOUBLE),
+				       field_b::MAP(VARCHAR, DOUBLE),
+				       lower(scoring_model::VARCHAR),
+				       tie_breaker::DOUBLE,
+				       b::DOUBLE
+			),
+			%field_scoring_config_ctes%
             df_cap(max_df) AS (
                 SELECT least(params.max_df, ceil(stats.num_docs * params.max_df_ratio)::BIGINT)
                 FROM %fts_schema%.stats AS stats
@@ -1162,43 +1211,7 @@ static string LayeredSearchTableMacroScript() {
                          termid,
                          rawtermid
             ),
-            field_config AS (
-                SELECT fts_fields.fieldid,
-                       coalesce(
-                           map_extract_value(params.field_weights, fts_fields.field),
-                           1.0
-                       )::DOUBLE AS field_weight
-                FROM %fts_schema%.fields AS fts_fields
-                CROSS JOIN params
-                WHERE CASE WHEN fields IS NULL THEN true ELSE fts_fields.field IN (
-                    SELECT trim(field_name) AS field
-                    FROM (
-                        SELECT unnest(string_split(fields, ',')) AS field_name
-                    ) AS split_fields
-                    WHERE trim(field_name) <> ''
-                ) END
-            ),
-            compatibility_term_tf AS (
-                SELECT selected_terms.termid,
-                       selected_terms.rawtermid,
-                       terms.docid,
-                       selected_terms.df,
-                       max(selected_terms.expansion_weight) AS expansion_weight,
-                       count(*) AS tf
-                FROM selected_terms
-                JOIN %fts_schema%.terms AS terms
-                  ON terms.termid = selected_terms.termid
-                 AND (
-                     selected_terms.rawtermid IS NULL
-                     OR terms.rawtermid = selected_terms.rawtermid
-                 )
-                WHERE terms.fieldid IN (SELECT fieldid FROM field_config)
-                GROUP BY selected_terms.termid,
-                         selected_terms.rawtermid,
-                         terms.docid,
-                         selected_terms.df
-            ),
-            field_term_tf AS (
+			field_term_tf AS (
                 SELECT selected_terms.termid,
                        selected_terms.rawtermid,
                        terms.docid,
@@ -1220,89 +1233,13 @@ static string LayeredSearchTableMacroScript() {
                          terms.fieldid,
                          selected_terms.df
             ),
-            compatibility_scores AS (
-                SELECT docs.name AS docname,
-                       sum(
-                           compatibility_term_tf.expansion_weight
-                           * log(((((stats.num_docs - compatibility_term_tf.df) + 0.5) / (compatibility_term_tf.df + 0.5)) + 1))
-                           * (
-                               (compatibility_term_tf.tf * (k + 1))
-                               / (
-                                   compatibility_term_tf.tf
-                                   + (
-                                       k
-                                       * ((1 - b) + (b * (docs.len / stats.avgdl)))
-                                   )
-                               )
-                           )
-                       ) AS score
-                FROM compatibility_term_tf
-                JOIN %fts_schema%.docs AS docs
-                  ON docs.docid = compatibility_term_tf.docid
-                CROSS JOIN %fts_schema%.stats AS stats
-                GROUP BY docs.name
-            ),
-            field_subscores AS (
-                SELECT docs.name AS docname,
-                       field_term_tf.fieldid,
-                       field_config.field_weight,
-                       field_term_tf.expansion_weight
-                       * log(((((stats.num_docs - field_term_tf.df) + 0.5) / (field_term_tf.df + 0.5)) + 1))
-                       * (
-                           (field_term_tf.tf * (k + 1))
-                           / (
-                               field_term_tf.tf
-                               + k * (
-                                   1 - b
-                                   + b * (
-                                       list_extract(docs.field_lens, field_term_tf.fieldid + 1)
-                                       / list_extract(stats.avg_field_lens, field_term_tf.fieldid + 1)
-                                   )
-                               )
-                           )
-                       ) AS subscore
-                FROM field_term_tf
-                JOIN %fts_schema%.docs AS docs ON docs.docid = field_term_tf.docid
-                JOIN field_config ON field_config.fieldid = field_term_tf.fieldid
-                CROSS JOIN %fts_schema%.stats AS stats
-            ),
-            per_field_scores AS (
-                SELECT docname,
-                       fieldid,
-                       max(field_weight) * sum(subscore) AS field_score
-                FROM field_subscores
-                GROUP BY docname,
-                         fieldid
-            ),
-            field_aware_scores AS (
-                SELECT per_field_scores.docname,
-                       CASE params.field_mode
-                           WHEN 'sum' THEN sum(field_score)
-                           WHEN 'best_fields' THEN max(field_score)
-                               + params.tie_breaker * (sum(field_score) - max(field_score))
-                       END AS score
-                FROM per_field_scores
-                CROSS JOIN params
-                GROUP BY per_field_scores.docname,
-                         params.field_mode,
-                         params.tie_breaker
-            ),
-            scores AS (
-                SELECT compatibility_scores.*
-                FROM compatibility_scores
-                CROSS JOIN params
-                WHERE params.compatibility_mode
-                UNION ALL
-                SELECT field_aware_scores.*
-                FROM field_aware_scores
-                CROSS JOIN params
-                WHERE NOT params.compatibility_mode
-            ),
-            ranked AS (
-                SELECT docname,
-                       score,
-                       row_number() OVER (ORDER BY score DESC, docname) AS rank
-                FROM scores
+			%field_scoring_score_ctes%,
+			ranked AS (
+				SELECT docs.name AS docname,
+				       scores.score,
+				       row_number() OVER (ORDER BY scores.score DESC, docs.name) AS rank
+				FROM scores
+				JOIN %fts_schema%.docs AS docs ON docs.docid = scores.docid
             ),
             results AS (
                 SELECT docname,
@@ -1322,14 +1259,16 @@ static string LayeredSearchTableMacroScript() {
             ORDER BY rank;
     )";
   // clang-format on
-  return StringUtil::Replace(result, "%field_scoring_validation_ctes%",
-                             FieldScoringValidationCTEs());
+  result = StringUtil::Replace(result, "%field_scoring_config_ctes%",
+                               FieldScoringConfigCTEs());
+  return StringUtil::Replace(result, "%field_scoring_score_ctes%",
+                             FieldScoringScoreCTEs());
 }
 
 static string LayeredMatchMacroScript() {
   // clang-format off
 	return R"(
-		CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard', field_weights := NULL, field_mode := 'sum', tie_breaker := 0.0) AS (
+			CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard', field_weights := NULL, field_b := NULL, scoring_model := 'bm25f', tie_breaker := 0.0) AS (
             SELECT score
             FROM %fts_schema%.search_layered_bm25(
                 query_string,
@@ -1345,10 +1284,11 @@ static string LayeredMatchMacroScript() {
                 enable_fuzzy := enable_fuzzy,
                 enable_short_fuzzy := enable_short_fuzzy,
                 expand_exact_terms := expand_exact_terms,
-                query_mode := query_mode,
-                field_weights := field_weights,
-                field_mode := field_mode,
-                tie_breaker := tie_breaker
+				query_mode := query_mode,
+				field_weights := field_weights,
+				field_b := field_b,
+				scoring_model := scoring_model,
+				tie_breaker := tie_breaker
             ) AS hits
             WHERE hits.docname = input_id
         );
