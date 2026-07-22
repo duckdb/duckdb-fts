@@ -37,6 +37,12 @@ FROM fts_main_documents.stats
 ----
 4	3.0	[1.25, 1.75]
 
+query II
+SELECT total_len, total_field_lens::VARCHAR
+FROM fts_main_documents.stats
+----
+12	[5, 7]
+
 # BM25F normalizes per field, combines weighted frequencies, and saturates once.
 query I
 WITH field_tf AS (
@@ -371,6 +377,17 @@ CREATE TABLE initially_empty(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
 statement ok
 PRAGMA create_fts_index('initially_empty', 'id', 'title', 'body', stemmer='none', stopwords='none', incremental=true)
 
+# Scalar validation must run even when neither the document nor query term exists.
+statement error
+SELECT fts_main_initially_empty.match_bm25('missing', 'missing', b := 1.5)
+----
+b must be finite and between 0 and 1
+
+query I
+SELECT fts_main_initially_empty.match_bm25('missing', 'missing') IS NULL
+----
+true
+
 statement ok
 INSERT INTO initially_empty VALUES ('one', 'alpha', '')
 
@@ -485,3 +502,48 @@ SELECT avgdl, avg_field_lens::VARCHAR
 FROM fts_main_clustered_docs.stats
 ----
 1.5	[1.0, 0.5]
+
+# Field vectors retain fixed positions for empty fields and delta maintenance
+# returns both averages and integer totals to the empty-index state.
+statement ok
+CREATE TABLE three_field_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR, notes VARCHAR)
+
+statement ok
+INSERT INTO three_field_docs VALUES
+    ('all_fields', 'alpha alpha', '', 'beta beta beta'),
+    ('empty_fields', NULL, '', '')
+
+statement ok
+PRAGMA create_fts_index('three_field_docs', 'id', 'title', 'body', 'notes', stemmer='none', stopwords='none', incremental=true)
+
+query II rowsort
+SELECT name, field_lens::VARCHAR
+FROM fts_main_three_field_docs.docs
+----
+all_fields	[2, 0, 3]
+empty_fields	[0, 0, 0]
+
+query III
+SELECT total_len, total_field_lens::VARCHAR, avg_field_lens::VARCHAR
+FROM fts_main_three_field_docs.stats
+----
+5	[2, 0, 3]	[1.0, 0.0, 1.5]
+
+statement ok
+INSERT INTO three_field_docs VALUES ('new_fields', '', 'gamma', 'delta delta')
+
+query III
+SELECT total_len, total_field_lens::VARCHAR, avg_field_lens::VARCHAR
+FROM fts_main_three_field_docs.stats
+----
+8	[2, 1, 5]	[0.6666666666666666, 0.3333333333333333, 1.6666666666666667]
+
+statement ok
+DELETE FROM three_field_docs
+
+query III
+SELECT num_docs, avgdl IS NULL AND avg_field_lens IS NULL,
+       total_len = 0 AND total_field_lens = [0, 0, 0]
+FROM fts_main_three_field_docs.stats
+----
+0	true	true
