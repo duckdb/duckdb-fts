@@ -1,0 +1,56 @@
+name ${display_name}
+group fts
+subgroup field-scoring
+
+require fts
+
+init
+CREATE TABLE documents(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR);
+INSERT INTO documents
+SELECT 'doc' || lpad(i::VARCHAR, 12, '0') AS id,
+       CASE i % 20
+           WHEN 0 THEN 'northstar primary record category' || (i % 100)::VARCHAR
+           WHEN 2 THEN 'northstar secondary record category' || (i % 100)::VARCHAR
+           ELSE 'record category' || (i % 100)::VARCHAR
+       END AS title,
+       CASE i % 20
+           WHEN 0 THEN 'northstar workspace item search benchmark primary'
+           WHEN 1 THEN 'northstar workspace item search benchmark secondary'
+           ELSE 'workspace item search benchmark baseline'
+       END || ' ' || substr(md5(i::VARCHAR), 1, 16) AS body
+FROM range(${rows}) AS source(i);
+
+load
+PRAGMA create_fts_index('documents', 'id', 'title', 'body', stemmer='none', stopwords='none', layered_search=true, incremental=true);
+
+assert I
+SELECT count(*) = 50
+FROM fts_main_documents.search_layered_bm25(
+    'northstar',
+    top_k := 50,
+    field_weights := MAP {'title': 4.0, 'body': 1.0},
+    field_b := MAP {'title': ${title_b}, 'body': ${body_b}},
+    scoring_model := '${scoring_model}',
+    tie_breaker := ${tie_breaker},
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+true
+
+run
+SELECT docname, score, rank
+FROM fts_main_documents.search_layered_bm25(
+    'northstar',
+    top_k := 50,
+    field_weights := MAP {'title': 4.0, 'body': 1.0},
+    field_b := MAP {'title': ${title_b}, 'body': ${body_b}},
+    scoring_model := '${scoring_model}',
+    tie_breaker := ${tie_breaker},
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+);

@@ -5,5 +5,6 @@ benchmark/fts/layered_autocomplete/haystack/layered_substring.benchmark
 benchmark/fts/layered_autocomplete/haystack/layered_fuzzy.benchmark
 benchmark/fts/layered_autocomplete/haystack/layered_mixed.benchmark
 benchmark/fts/layered_autocomplete/haystack/layered_match.benchmark
+benchmark/fts/layered_autocomplete/haystack/base_match.benchmark
 benchmark/fts/layered_autocomplete/haystack/incremental_insert.benchmark
 benchmark/fts/layered_autocomplete/haystack/incremental_delete.benchmark

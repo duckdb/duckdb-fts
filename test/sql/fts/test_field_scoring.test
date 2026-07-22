@@ -1,0 +1,549 @@
+# name: test/sql/fts/test_field_scoring.test
+# description: BM25F, best-fields scoring, validation, and field-statistics maintenance
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE documents(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO documents VALUES
+    ('title_match', 'alpha alpha', 'noise noise noise noise'),
+    ('body_match', 'noise noise', 'alpha alpha'),
+    ('both_match', 'alpha', 'alpha'),
+    ('empty', NULL, '')
+
+statement ok
+PRAGMA create_fts_index('documents', 'id', 'title', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+# Per-field lengths are aligned with fieldid, including zero-token fields.
+query IIII rowsort
+SELECT name, len, field_lens::VARCHAR, docid
+FROM fts_main_documents.docs
+----
+body_match	4	[2, 2]	1
+both_match	2	[1, 1]	2
+empty	0	[0, 0]	3
+title_match	6	[2, 4]	0
+
+query III
+SELECT num_docs, avgdl, avg_field_lens::VARCHAR
+FROM fts_main_documents.stats
+----
+4	3.0	[1.25, 1.75]
+
+query II
+SELECT total_len, total_field_lens::VARCHAR
+FROM fts_main_documents.stats
+----
+12	[5, 7]
+
+# BM25F normalizes per field, combines weighted frequencies, and saturates once.
+query I
+WITH field_tf AS (
+    SELECT terms.docid, terms.termid, terms.fieldid, count(*)::DOUBLE AS tf
+    FROM fts_main_documents.terms AS terms
+    JOIN fts_main_documents.dict AS dict USING (termid)
+    WHERE dict.term = 'alpha'
+    GROUP BY terms.docid, terms.termid, terms.fieldid
+), normalized AS (
+    SELECT field_tf.docid,
+           field_tf.termid,
+           dict.df,
+           CASE fields.field WHEN 'title' THEN 4.0 ELSE 1.0 END
+           * field_tf.tf / (
+               1.0 - CASE fields.field WHEN 'title' THEN 0.2 ELSE 0.9 END
+               + CASE fields.field WHEN 'title' THEN 0.2 ELSE 0.9 END
+               * list_extract(docs.field_lens, field_tf.fieldid + 1)
+               / list_extract(stats.avg_field_lens, field_tf.fieldid + 1)
+           ) AS weighted_normalized_tf
+    FROM field_tf
+    JOIN fts_main_documents.docs AS docs USING (docid)
+    JOIN fts_main_documents.dict AS dict USING (termid)
+    JOIN fts_main_documents.fields AS fields USING (fieldid)
+    CROSS JOIN fts_main_documents.stats AS stats
+), pseudo_frequencies AS (
+    SELECT docid,
+           termid,
+           any_value(df) AS df,
+           sum(weighted_normalized_tf) AS pseudo_tf
+    FROM normalized
+    GROUP BY docid, termid
+), expected AS (
+    SELECT docs.name,
+           log(((stats.num_docs - df + 0.5) / (df + 0.5)) + 1)
+           * pseudo_tf * 2.2 / (pseudo_tf + 1.2) AS score
+    FROM pseudo_frequencies
+    JOIN fts_main_documents.docs AS docs USING (docid)
+    CROSS JOIN fts_main_documents.stats AS stats
+), actual AS (
+    SELECT id AS name,
+           fts_main_documents.match_bm25(
+               id,
+               'alpha',
+               field_weights := MAP {'title': 4.0},
+               field_b := MAP {'title': 0.2, 'body': 0.9}
+           ) AS score
+    FROM documents
+)
+SELECT count(*) = 3 AND bool_and(abs(expected.score - actual.score) < 1e-12)
+FROM expected
+JOIN actual USING (name)
+----
+true
+
+# With exact expansion disabled, layered defaults retain the same scores.
+query I
+WITH layered AS (
+    SELECT docname, score
+    FROM fts_main_documents.search_layered_bm25(
+        'alpha',
+        top_k := NULL,
+        field_weights := MAP {'title': 4.0},
+        field_b := MAP {'title': 0.2, 'body': 0.9},
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+), base AS (
+    SELECT id AS docname,
+           fts_main_documents.match_bm25(
+               id,
+               'alpha',
+               field_weights := MAP {'title': 4.0},
+               field_b := MAP {'title': 0.2, 'body': 0.9}
+           ) AS score
+    FROM documents
+)
+SELECT count(*) = 3 AND bool_and(abs(layered.score - base.score) < 1e-12)
+FROM layered
+JOIN base USING (docname)
+----
+true
+
+# With one indexed field, BM25F is ordinary BM25.
+statement ok
+CREATE TABLE single_field_docs(id VARCHAR NOT NULL, text VARCHAR)
+
+statement ok
+INSERT INTO single_field_docs VALUES
+    ('one', 'alpha alpha'),
+    ('two', 'alpha beta beta'),
+    ('three', 'gamma')
+
+statement ok
+PRAGMA create_fts_index('single_field_docs', 'id', 'text', stemmer='none', stopwords='none')
+
+query I
+WITH term_tf AS (
+    SELECT terms.docid, terms.termid, count(*)::DOUBLE AS tf
+    FROM fts_main_single_field_docs.terms AS terms
+    JOIN fts_main_single_field_docs.dict AS dict USING (termid)
+    WHERE dict.term = 'alpha'
+    GROUP BY terms.docid, terms.termid
+), expected AS (
+    SELECT docs.name,
+           log(((stats.num_docs - dict.df + 0.5) / (dict.df + 0.5)) + 1)
+           * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * docs.len / stats.avgdl)) AS score
+    FROM term_tf
+    JOIN fts_main_single_field_docs.docs AS docs USING (docid)
+    JOIN fts_main_single_field_docs.dict AS dict USING (termid)
+    CROSS JOIN fts_main_single_field_docs.stats AS stats
+), actual AS (
+    SELECT id AS name, fts_main_single_field_docs.match_bm25(id, 'alpha') AS score
+    FROM single_field_docs
+)
+SELECT count(*) = 2 AND bool_and(abs(expected.score - actual.score) < 1e-12)
+FROM expected
+JOIN actual USING (name)
+----
+true
+
+# Omitted field settings inherit weight 1 and the scalar b value.
+query II
+SELECT bool_and(implicit_weight = explicit_weight) FILTER (implicit_weight IS NOT NULL),
+       bool_and(implicit_b = explicit_b) FILTER (implicit_b IS NOT NULL)
+FROM (
+    SELECT fts_main_documents.match_bm25(id, 'alpha', field_weights := MAP {'title': 4.0}) AS implicit_weight,
+           fts_main_documents.match_bm25(id, 'alpha', field_weights := MAP {'title': 4.0, 'body': 1.0}) AS explicit_weight,
+           fts_main_documents.match_bm25(id, 'alpha', b := 0.4, field_b := MAP {'title': 0.2}) AS implicit_b,
+           fts_main_documents.match_bm25(id, 'alpha', b := 0.4, field_b := MAP {'title': 0.2, 'body': 0.4}) AS explicit_b
+    FROM documents
+) AS scores
+----
+true	true
+
+# Field filtering is applied before weighting, and a zero weight suppresses that field's score.
+query II
+SELECT
+    abs(
+        fts_main_documents.match_bm25('body_match', 'alpha', fields := 'body', field_weights := MAP {'title': 100.0})
+        - fts_main_documents.match_bm25('body_match', 'alpha', fields := 'body', field_weights := MAP {})
+    ) < 1e-12,
+    fts_main_documents.match_bm25('title_match', 'alpha', field_weights := MAP {'title': 0.0}) = 0
+----
+true	true
+
+# best_fields uses max + tie_breaker * (sum - max).
+query III
+WITH components AS (
+    SELECT
+        fts_main_documents.match_bm25('both_match', 'alpha', fields := 'title', scoring_model := 'best_fields') AS title_score,
+        fts_main_documents.match_bm25('both_match', 'alpha', fields := 'body', scoring_model := 'best_fields') AS body_score,
+        fts_main_documents.match_bm25('both_match', 'alpha', scoring_model := 'best_fields') AS best_score,
+        fts_main_documents.match_bm25('both_match', 'alpha', scoring_model := 'best_fields', tie_breaker := 0.5) AS half_score,
+        fts_main_documents.match_bm25('both_match', 'alpha', scoring_model := 'best_fields', tie_breaker := 1.0) AS full_score
+)
+SELECT abs(best_score - greatest(title_score, body_score)) < 1e-12,
+       abs(half_score - (greatest(title_score, body_score) + 0.5 * least(title_score, body_score))) < 1e-12
+           AND abs(full_score - (title_score + body_score)) < 1e-12,
+       abs(full_score - (title_score + body_score)) < 1e-12
+FROM components
+----
+true	true	true
+
+# Canonical BM25F saturates the combined frequency once. Field-local score
+# summation would incorrectly rank split first.
+statement ok
+CREATE TABLE bm25f_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO bm25f_docs VALUES
+    ('split', 'alpha', 'alpha'),
+    ('concentrated', 'alpha alpha alpha', '')
+
+statement ok
+PRAGMA create_fts_index('bm25f_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I
+SELECT string_agg(id, ',' ORDER BY score DESC, id)
+FROM (
+    SELECT id, fts_main_bm25f_docs.match_bm25(id, 'alpha', b := 0) AS score
+    FROM bm25f_docs
+) AS scored
+----
+concentrated,split
+
+query I
+WITH base AS (
+    SELECT id AS docname, fts_main_bm25f_docs.match_bm25(id, 'alpha', b := 0) AS score
+    FROM bm25f_docs
+), layered AS (
+    SELECT docname, score
+    FROM fts_main_bm25f_docs.search_layered_bm25(
+        'alpha',
+        b := 0,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+)
+SELECT count(*) = 2 AND bool_and(abs(base.score - layered.score) < 1e-12)
+FROM base
+JOIN layered USING (docname)
+----
+true
+
+query I
+SELECT docname
+FROM fts_main_documents.search_layered_bm25(
+    'alpha',
+    field_weights := MAP {'title': 100.0},
+    enable_prefix := false,
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+ORDER BY rank
+LIMIT 1
+----
+title_match
+
+# Field-aware scoring also applies after prefix, fuzzy, and autocomplete expansion.
+statement ok
+CREATE TABLE expansion_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO expansion_docs VALUES
+    ('title_expansion', 'zephyr', 'noise'),
+    ('body_expansion', 'noise', 'zeppelin')
+
+statement ok
+PRAGMA create_fts_index('expansion_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I
+SELECT string_agg(docname, ',' ORDER BY rank)
+FROM fts_main_expansion_docs.search_layered_bm25(
+    'zep',
+    field_weights := MAP {'title': 4.0},
+    enable_substring := false,
+    enable_fuzzy := false,
+    enable_short_fuzzy := false
+)
+----
+title_expansion,body_expansion
+
+query I
+SELECT docname
+FROM fts_main_expansion_docs.search_layered_bm25(
+    'zephr',
+    field_weights := MAP {'title': 4.0},
+    scoring_model := 'best_fields',
+    enable_prefix := false,
+    enable_substring := false
+)
+ORDER BY rank
+LIMIT 1
+----
+title_expansion
+
+query I
+SELECT string_agg(docname, ',' ORDER BY rank)
+FROM fts_main_expansion_docs.search_layered_bm25(
+    'zep',
+    query_mode := 'autocomplete',
+    field_weights := MAP {'title': 4.0}
+)
+----
+title_expansion,body_expansion
+
+# Invalid field-scoring configuration fails before returning results.
+statement error
+SELECT fts_main_documents.match_bm25('title_match', 'alpha', scoring_model := 'invalid')
+----
+scoring_model must be either bm25f or best_fields
+
+statement error
+SELECT * FROM fts_main_documents.search_layered_bm25('alpha', scoring_model := NULL)
+----
+scoring_model must be either bm25f or best_fields
+
+statement error
+SELECT fts_main_documents.match_bm25('title_match', 'alpha', tie_breaker := 1.5)
+----
+tie_breaker must be finite and between 0 and 1
+
+statement error
+SELECT * FROM fts_main_documents.search_layered_bm25('alpha', tie_breaker := 'NaN'::DOUBLE)
+----
+tie_breaker must be finite and between 0 and 1
+
+statement error
+SELECT fts_main_documents.match_bm25('title_match', 'alpha', tie_breaker := 0.5)
+----
+tie_breaker is only supported with best_fields scoring
+
+statement error
+SELECT fts_main_documents.match_bm25('title_match', 'alpha', b := 1.5)
+----
+b must be finite and between 0 and 1
+
+statement error
+SELECT fts_main_documents.match_bm25('title_match', 'alpha', field_weights := MAP {'title': -1.0})
+----
+field weight for title must be finite and non-negative
+
+statement error
+SELECT * FROM fts_main_documents.search_layered_bm25('alpha', field_weights := MAP {'title': NULL::DOUBLE})
+----
+field weight for title must be finite and non-negative
+
+statement error
+SELECT fts_main_documents.match_bm25('title_match', 'alpha', field_weights := MAP {'missing': 1.0})
+----
+field_weights contains unknown field: missing
+
+statement error
+SELECT fts_main_documents.match_bm25('title_match', 'alpha', field_b := MAP {'title': -0.1})
+----
+field b for title must be finite and between 0 and 1
+
+statement error
+SELECT * FROM fts_main_documents.search_layered_bm25('alpha', field_b := MAP {'missing': 0.5})
+----
+field_b contains unknown field: missing
+
+# An initially empty incremental index acquires usable field averages on insert.
+statement ok
+CREATE TABLE initially_empty(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+PRAGMA create_fts_index('initially_empty', 'id', 'title', 'body', stemmer='none', stopwords='none', incremental=true)
+
+# Scalar validation must run even when neither the document nor query term exists.
+statement error
+SELECT fts_main_initially_empty.match_bm25('missing', 'missing', b := 1.5)
+----
+b must be finite and between 0 and 1
+
+query I
+SELECT fts_main_initially_empty.match_bm25('missing', 'missing') IS NULL
+----
+true
+
+statement ok
+INSERT INTO initially_empty VALUES ('one', 'alpha', '')
+
+query II
+SELECT avg_field_lens::VARCHAR,
+       fts_main_initially_empty.match_bm25('one', 'alpha') IS NOT NULL
+FROM fts_main_initially_empty.stats
+----
+[1.0, 0.0]	true
+
+# Regular incremental maintenance keeps per-field lengths and averages current.
+statement ok
+CREATE TABLE live_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO live_docs VALUES
+    ('live1', 'alpha alpha', 'beta'),
+    ('live2', NULL, 'alpha beta beta')
+
+statement ok
+PRAGMA create_fts_index('live_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', layered_search=true, incremental=true)
+
+statement ok
+INSERT INTO live_docs VALUES ('live3', 'alpha', '')
+
+statement ok
+DELETE FROM live_docs WHERE id = 'live1'
+
+query II rowsort
+SELECT name, field_lens::VARCHAR
+FROM fts_main_live_docs.docs
+----
+live2	[0, 3]
+live3	[1, 0]
+
+query II
+SELECT avgdl, avg_field_lens::VARCHAR
+FROM fts_main_live_docs.stats
+----
+2.0	[0.5, 1.5]
+
+# Incremental scores match a clean rebuild of the same table state.
+statement ok
+CREATE TABLE rebuilt_docs AS SELECT * FROM live_docs
+
+statement ok
+PRAGMA create_fts_index('rebuilt_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I
+WITH live_scores AS (
+    SELECT docname, score
+    FROM fts_main_live_docs.search_layered_bm25(
+        'alpha',
+        top_k := NULL,
+        field_weights := MAP {'title': 3.0},
+        field_b := MAP {'title': 0.2},
+        scoring_model := 'best_fields',
+        tie_breaker := 0.25,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+), rebuilt_scores AS (
+    SELECT docname, score
+    FROM fts_main_rebuilt_docs.search_layered_bm25(
+        'alpha',
+        top_k := NULL,
+        field_weights := MAP {'title': 3.0},
+        field_b := MAP {'title': 0.2},
+        scoring_model := 'best_fields',
+        tie_breaker := 0.25,
+        enable_prefix := false,
+        enable_substring := false,
+        enable_fuzzy := false,
+        enable_short_fuzzy := false
+    )
+)
+SELECT count(*) = 2 AND bool_and(abs(live_scores.score - rebuilt_scores.score) < 1e-12)
+FROM live_scores
+JOIN rebuilt_scores USING (docname)
+----
+true
+
+# The clustered incremental terms path maintains the same field statistics.
+statement ok
+CREATE TABLE clustered_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO clustered_docs VALUES
+    ('clustered1', 'alpha', 'beta beta'),
+    ('clustered2', NULL, 'alpha')
+
+statement ok
+PRAGMA create_fts_index('clustered_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', incremental=true, cluster_terms=true)
+
+statement ok
+INSERT INTO clustered_docs VALUES ('clustered3', 'alpha alpha', '')
+
+statement ok
+DELETE FROM clustered_docs WHERE id = 'clustered1'
+
+query II rowsort
+SELECT name, field_lens::VARCHAR
+FROM fts_main_clustered_docs.docs
+----
+clustered2	[0, 1]
+clustered3	[2, 0]
+
+query II
+SELECT avgdl, avg_field_lens::VARCHAR
+FROM fts_main_clustered_docs.stats
+----
+1.5	[1.0, 0.5]
+
+# Field vectors retain fixed positions for empty fields and delta maintenance
+# returns both averages and integer totals to the empty-index state.
+statement ok
+CREATE TABLE three_field_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR, notes VARCHAR)
+
+statement ok
+INSERT INTO three_field_docs VALUES
+    ('all_fields', 'alpha alpha', '', 'beta beta beta'),
+    ('empty_fields', NULL, '', '')
+
+statement ok
+PRAGMA create_fts_index('three_field_docs', 'id', 'title', 'body', 'notes', stemmer='none', stopwords='none', incremental=true)
+
+query II rowsort
+SELECT name, field_lens::VARCHAR
+FROM fts_main_three_field_docs.docs
+----
+all_fields	[2, 0, 3]
+empty_fields	[0, 0, 0]
+
+query III
+SELECT total_len, total_field_lens::VARCHAR, avg_field_lens::VARCHAR
+FROM fts_main_three_field_docs.stats
+----
+5	[2, 0, 3]	[1.0, 0.0, 1.5]
+
+statement ok
+INSERT INTO three_field_docs VALUES ('new_fields', '', 'gamma', 'delta delta')
+
+query III
+SELECT total_len, total_field_lens::VARCHAR, avg_field_lens::VARCHAR
+FROM fts_main_three_field_docs.stats
+----
+8	[2, 1, 5]	[0.6666666666666666, 0.3333333333333333, 1.6666666666666667]
+
+statement ok
+DELETE FROM three_field_docs
+
+query III
+SELECT num_docs, avgdl IS NULL AND avg_field_lens IS NULL,
+       total_len = 0 AND total_field_lens = [0, 0, 0]
+FROM fts_main_three_field_docs.stats
+----
+0	true	true

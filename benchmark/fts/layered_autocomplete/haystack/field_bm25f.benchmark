@@ -1,0 +1,7 @@
+template benchmark/fts/layered_autocomplete/templates/field_scoring.benchmark.in
+display_name=FTS layered weighted BM25F query (1M)
+rows=1000000
+scoring_model=bm25f
+tie_breaker=0.0
+title_b=0.75
+body_b=0.75

@@ -1,0 +1,7 @@
+template benchmark/fts/layered_autocomplete/templates/field_scoring.benchmark.in
+display_name=FTS layered per-field normalized BM25F query (50K)
+rows=50000
+scoring_model=bm25f
+tie_breaker=0.0
+title_b=0.2
+body_b=0.9

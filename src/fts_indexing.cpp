@@ -73,15 +73,15 @@ GetFTSClusteredInsertTriggerNames(const QualifiedName &qname) {
 
 static vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
-  return {prefix + "00_dict_df", prefix + "10_terms", prefix + "20_docs",
-          prefix + "30_dict_prune", prefix + "40_stats"};
+  return {prefix + "00_dict_df", prefix + "10_terms", prefix + "15_stats",
+          prefix + "20_docs", prefix + "30_dict_prune"};
 }
 
 static vector<string>
 GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
-  return {prefix + "00_dict_df", prefix + "10_terms_store", prefix + "20_docs",
-          prefix + "30_dict_prune", prefix + "40_stats"};
+  return {prefix + "00_dict_df", prefix + "10_terms_store", prefix + "15_stats",
+          prefix + "20_docs", prefix + "30_dict_prune"};
 }
 
 static vector<string>
@@ -122,6 +122,10 @@ static vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
   auto layered_delete_triggers = GetFTSLayeredDeleteTriggerNames(qname);
   result.insert(result.end(), layered_delete_triggers.begin(),
                 layered_delete_triggers.end());
+  // Indexes created before delta statistics used this delete trigger name.
+  auto delete_prefix =
+      StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
+  result.push_back(delete_prefix + "40_stats");
   return result;
 }
 
@@ -156,6 +160,113 @@ static string GetFTSTermGramsGramIndex(const QualifiedName &qname) {
 static string GetFTSTermPrefixesPrefixIndex(const QualifiedName &qname) {
   return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
                                  "_term_prefixes_prefix_idx");
+}
+
+static string FieldLengthAggregateList(idx_t field_count) {
+  vector<string> field_lengths;
+  for (idx_t field_id = 0; field_id < field_count; field_id++) {
+    field_lengths.push_back(StringUtil::Format(
+        "count(*) FILTER (WHERE fieldid = %i)::BIGINT", field_id));
+  }
+  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+}
+
+static string ZeroFieldLengthList(idx_t field_count, const string &type) {
+  vector<string> field_lengths;
+  for (idx_t field_id = 0; field_id < field_count; field_id++) {
+    field_lengths.push_back("0::" + type);
+  }
+  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+}
+
+static string StatsFieldAggregateList(idx_t field_count,
+                                      const string &aggregate,
+                                      const string &fallback,
+                                      const string &type) {
+  vector<string> field_lengths;
+  for (idx_t field_id = 0; field_id < field_count; field_id++) {
+    auto expression = StringUtil::Format(
+        "%s(list_extract(docs.field_lens, %i))", aggregate, field_id + 1);
+    if (!fallback.empty()) {
+      expression = StringUtil::Format("coalesce(%s, %s)", expression, fallback);
+    }
+    field_lengths.push_back(expression + "::" + type);
+  }
+  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+}
+
+static string StatsDeltaFieldList(idx_t field_count, const string &operation,
+                                  bool average) {
+  vector<string> field_lengths;
+  for (idx_t field_id = 0; field_id < field_count; field_id++) {
+    auto value =
+        StringUtil::Format("list_extract(fts_stats.total_field_lens, %i) %s "
+                           "delta.field_len_%i",
+                           field_id + 1, operation, field_id);
+    if (average) {
+      value = StringUtil::Format(
+          "(%s)::DOUBLE / (fts_stats.num_docs %s delta.num_docs)", value,
+          operation);
+    } else {
+      value = "(" + value + ")::HUGEINT";
+    }
+    field_lengths.push_back(value);
+  }
+  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+}
+
+static string StatsDeltaUpdateStatement(idx_t field_count, bool insert) {
+  auto operation = insert ? "+" : "-";
+  auto transition_table = insert ? "fts_new_rows" : "fts_old_rows";
+  vector<string> delta_field_lengths;
+  for (idx_t field_id = 0; field_id < field_count; field_id++) {
+    delta_field_lengths.push_back(StringUtil::Format(
+        "coalesce(sum(list_extract(docs.field_lens, %i)), 0)::HUGEINT AS "
+        "field_len_%i",
+        field_id + 1, field_id));
+  }
+
+  // clang-format off
+	string result = R"(
+            UPDATE %fts_schema%.stats AS fts_stats
+            SET num_docs = fts_stats.num_docs %operation% delta.num_docs,
+                avgdl = CASE
+                    WHEN fts_stats.num_docs %operation% delta.num_docs = 0 THEN NULL
+                    ELSE (
+                        fts_stats.total_len %operation% delta.total_len
+                    )::DOUBLE / (
+                        fts_stats.num_docs %operation% delta.num_docs
+                    )
+                END,
+                avg_field_lens = CASE
+                    WHEN fts_stats.num_docs %operation% delta.num_docs = 0
+                        THEN NULL::DOUBLE[]
+                    ELSE %average_field_lengths%
+                END,
+                total_len = fts_stats.total_len %operation% delta.total_len,
+                total_field_lens = %total_field_lengths%
+            FROM (
+                SELECT count(*)::BIGINT AS num_docs,
+                       coalesce(sum(docs.len), 0)::HUGEINT AS total_len,
+                       %delta_field_lengths%
+                FROM %fts_schema%.docs AS docs
+                JOIN %transition_table% AS changed_rows
+                  ON docs.name = changed_rows.%input_id%
+            ) AS delta
+    )";
+  // clang-format on
+
+  result = StringUtil::Replace(result, "%operation%", operation);
+  result =
+      StringUtil::Replace(result, "%average_field_lengths%",
+                          StatsDeltaFieldList(field_count, operation, true));
+  result =
+      StringUtil::Replace(result, "%total_field_lengths%",
+                          StatsDeltaFieldList(field_count, operation, false));
+  result = StringUtil::Replace(
+      result, "%delta_field_lengths%",
+      StringUtil::Join(delta_field_lengths, ",\n                       "));
+  return StringUtil::Replace(result, "%transition_table%", transition_table);
 }
 
 static bool TableExists(ClientContext &context, const QualifiedName &qname) {
@@ -293,16 +404,17 @@ static string IndexTablesScript(const string &input_id,
         CREATE TABLE %fts_schema%.docs AS
         WITH lengths AS (
             SELECT docid,
-                   count(*)::BIGINT AS len
+                   count(*)::BIGINT AS len,
+                   %field_length_aggregates% AS field_lens
             FROM temp.%build_terms_table%
             GROUP BY docid
         )
         SELECT fts_docs.rowid AS docid,
                fts_docs.%input_id% AS name,
-               COALESCE(lengths.len, 0)::BIGINT AS len
+               coalesce(lengths.len, 0)::BIGINT AS len,
+               coalesce(lengths.field_lens, %zero_field_lengths%)::BIGINT[] AS field_lens
         FROM %input_table% AS fts_docs
-        LEFT JOIN lengths
-          ON lengths.docid = fts_docs.rowid
+        LEFT JOIN lengths ON lengths.docid = fts_docs.rowid
         ORDER BY fts_docs.rowid;
 
         CREATE TEMP TABLE %build_dict_table% AS
@@ -356,8 +468,14 @@ static string IndexTablesScript(const string &input_id,
         DROP TABLE IF EXISTS temp.%build_raw_dict_table%;
 
         CREATE TABLE %fts_schema%.stats AS (
-            SELECT COUNT(docs.docid) AS num_docs,
-                   SUM(docs.len) / COUNT(docs.len) AS avgdl
+            SELECT count(docs.docid)::BIGINT AS num_docs,
+                   avg(docs.len)::DOUBLE AS avgdl,
+                   CASE WHEN count(docs.docid) = 0
+                       THEN NULL::DOUBLE[]
+                       ELSE %average_field_lengths%
+                   END AS avg_field_lens,
+                   coalesce(sum(docs.len), 0)::HUGEINT AS total_len,
+                   %total_field_lengths% AS total_field_lens
             FROM %fts_schema%.docs AS docs
         );
     )";
@@ -393,6 +511,17 @@ static string IndexTablesScript(const string &input_id,
   result = StringUtil::Replace(result, "%build_dict_table%", build_dict_table);
   result = StringUtil::Replace(result, "%build_raw_dict_table%",
                                build_raw_dict_table);
+  result = StringUtil::Replace(result, "%field_length_aggregates%",
+                               FieldLengthAggregateList(input_values.size()));
+  result =
+      StringUtil::Replace(result, "%zero_field_lengths%",
+                          ZeroFieldLengthList(input_values.size(), "BIGINT"));
+  result = StringUtil::Replace(
+      result, "%average_field_lengths%",
+      StatsFieldAggregateList(input_values.size(), "avg", "", "DOUBLE"));
+  result = StringUtil::Replace(
+      result, "%total_field_lengths%",
+      StatsFieldAggregateList(input_values.size(), "sum", "0", "HUGEINT"));
   string build_raw_dict;
   string raw_dict_table;
   if (layered_search) {
@@ -541,11 +670,201 @@ static string LayeredSidecarScript(const QualifiedName &qname) {
   return result;
 }
 
-static string MatchMacroScript() {
+static string FieldScoringConfigCTEs() {
   // clang-format off
 	return R"(
-        CREATE MACRO %fts_schema%.match_bm25(docname, query_string, fields := NULL, k := 1.2, b := 0.75, conjunctive := false) AS (
-            WITH raw_tokens AS (
+            requested_fields AS (
+                SELECT trim(field_name) AS field
+                FROM (
+                    SELECT unnest(string_split(fields, ',')) AS field_name
+                ) AS split_fields
+                WHERE trim(field_name) <> ''
+            ),
+            weight_entries AS (
+                SELECT unnest(map_entries(params.field_weights), recursive := true)
+                FROM params
+            ),
+            field_b_entries AS (
+                SELECT unnest(map_entries(params.field_b), recursive := true)
+                FROM params
+            ),
+            validation_errors AS (
+                SELECT 'scoring_model must be either bm25f or best_fields' AS message
+                FROM params
+                WHERE params.scoring_model IS NULL
+                   OR params.scoring_model NOT IN ('bm25f', 'best_fields')
+                UNION ALL
+                SELECT 'tie_breaker must be finite and between 0 and 1' AS message
+                FROM params
+                WHERE params.tie_breaker IS NULL
+                   OR NOT isfinite(params.tie_breaker)
+                   OR params.tie_breaker NOT BETWEEN 0.0 AND 1.0
+                UNION ALL
+                SELECT 'tie_breaker is only supported with best_fields scoring' AS message
+                FROM params
+                WHERE params.scoring_model = 'bm25f'
+                  AND params.tie_breaker <> 0.0
+                UNION ALL
+                SELECT 'b must be finite and between 0 and 1' AS message
+                FROM params
+                WHERE params.default_b IS NULL
+                   OR NOT isfinite(params.default_b)
+                   OR params.default_b NOT BETWEEN 0.0 AND 1.0
+                UNION ALL
+                SELECT 'field weight for ' || key || ' must be finite and non-negative' AS message
+                FROM weight_entries
+                WHERE value IS NULL
+                   OR NOT isfinite(value)
+                   OR value < 0.0
+                UNION ALL
+                SELECT 'field_weights contains unknown field: ' || key AS message
+                FROM weight_entries
+                WHERE key NOT IN (SELECT field FROM %fts_schema%.fields)
+                UNION ALL
+                SELECT 'field b for ' || key || ' must be finite and between 0 and 1' AS message
+                FROM field_b_entries
+                WHERE value IS NULL
+                   OR NOT isfinite(value)
+                   OR value NOT BETWEEN 0.0 AND 1.0
+                UNION ALL
+                SELECT 'field_b contains unknown field: ' || key AS message
+                FROM field_b_entries
+                WHERE key NOT IN (SELECT field FROM %fts_schema%.fields)
+            ),
+            field_config AS (
+                SELECT fts_fields.fieldid,
+                       coalesce(
+                           map_extract_value(params.field_weights, fts_fields.field),
+                           1.0
+                       )::DOUBLE AS field_weight,
+                       coalesce(
+                           map_extract_value(params.field_b, fts_fields.field),
+                           params.default_b
+                       )::DOUBLE AS field_b,
+                       list_extract(
+                           stats.avg_field_lens,
+                           fts_fields.fieldid + 1
+                       ) AS avg_field_len
+                FROM %fts_schema%.fields AS fts_fields
+                CROSS JOIN params
+                CROSS JOIN %fts_schema%.stats AS stats
+                WHERE CASE WHEN fields IS NULL THEN true ELSE fts_fields.field IN (
+                    SELECT requested_fields.field
+                    FROM requested_fields
+                ) END
+            ),
+    )";
+  // clang-format on
+}
+
+static string FieldScoringScoreCTEs() {
+  // clang-format off
+	return R"(
+            normalized_field_terms AS (
+                SELECT field_term_tf.docid,
+                       field_term_tf.termid,
+                       field_term_tf.rawtermid,
+                       field_term_tf.fieldid,
+                       field_term_tf.df,
+                       field_term_tf.expansion_weight,
+                       field_config.field_weight,
+                       field_term_tf.tf / (
+                           (1.0 - field_config.field_b)
+                           + field_config.field_b * (
+                               list_extract(docs.field_lens, field_term_tf.fieldid + 1)
+                               / field_config.avg_field_len
+                           )
+                       ) AS normalized_tf
+                FROM field_term_tf
+                JOIN %fts_schema%.docs AS docs
+                  ON docs.docid = field_term_tf.docid
+                JOIN field_config
+                  ON field_config.fieldid = field_term_tf.fieldid
+            ),
+            bm25f_term_frequencies AS (
+                SELECT docid,
+                       termid,
+                       rawtermid,
+                       any_value(df) AS df,
+                       max(expansion_weight) AS expansion_weight,
+                       sum(field_weight * normalized_tf) AS pseudo_tf
+                FROM normalized_field_terms
+                GROUP BY docid,
+                         termid,
+                         rawtermid
+            ),
+            bm25f_scores AS (
+                SELECT bm25f_term_frequencies.docid,
+                       sum(
+                           expansion_weight
+                           * log(((((stats.num_docs - df) + 0.5) / (df + 0.5)) + 1))
+                           * (
+                               (pseudo_tf * (k + 1))
+                               / (pseudo_tf + k)
+                           )
+                       ) AS score
+                FROM bm25f_term_frequencies
+                CROSS JOIN %fts_schema%.stats AS stats
+                GROUP BY bm25f_term_frequencies.docid
+            ),
+            best_field_term_scores AS (
+                SELECT docid,
+                       fieldid,
+                       field_weight,
+                       expansion_weight
+                       * log(((((stats.num_docs - df) + 0.5) / (df + 0.5)) + 1))
+                       * (
+                           (normalized_tf * (k + 1))
+                           / (normalized_tf + k)
+                       ) AS term_score
+                FROM normalized_field_terms
+                CROSS JOIN %fts_schema%.stats AS stats
+            ),
+            per_field_scores AS (
+                SELECT docid,
+                       fieldid,
+                       max(field_weight) * sum(term_score) AS field_score
+                FROM best_field_term_scores
+                GROUP BY docid,
+                         fieldid
+            ),
+            best_field_scores AS (
+                SELECT per_field_scores.docid,
+                       max(field_score)
+                           + params.tie_breaker * (sum(field_score) - max(field_score)) AS score
+                FROM per_field_scores
+                CROSS JOIN params
+                GROUP BY per_field_scores.docid,
+                         params.tie_breaker
+            ),
+            scores AS (
+                SELECT bm25f_scores.*
+                FROM bm25f_scores
+                CROSS JOIN params
+                WHERE params.scoring_model = 'bm25f'
+                UNION ALL
+                SELECT best_field_scores.*
+                FROM best_field_scores
+                CROSS JOIN params
+                WHERE params.scoring_model = 'best_fields'
+            )
+    )";
+  // clang-format on
+}
+
+static string MatchMacroScript() {
+  // clang-format off
+	string result = R"(
+		CREATE MACRO %fts_schema%.match_bm25(docname, query_string, fields := NULL, k := 1.2, b := 0.75, conjunctive := false, field_weights := NULL, field_b := NULL, scoring_model := 'bm25f', tie_breaker := 0.0) AS (
+			WITH params AS (
+				SELECT field_weights::MAP(VARCHAR, DOUBLE) AS field_weights,
+				       field_b::MAP(VARCHAR, DOUBLE) AS field_b,
+				       lower(scoring_model::VARCHAR) AS scoring_model,
+				       tie_breaker::DOUBLE AS tie_breaker,
+				       b::DOUBLE AS default_b
+			),
+			%field_scoring_config_ctes%
+            raw_tokens AS (
                 SELECT DISTINCT raw_token
                 FROM (
                     SELECT unnest(%fts_schema%.tokenize(query_string)) AS raw_token
@@ -563,18 +882,6 @@ static string MatchMacroScript() {
                 WHERE t IS NOT NULL
                   AND t <> ''
             ),
-            requested_fields AS (
-                SELECT trim(field_name) AS field
-                FROM (
-                    SELECT unnest(string_split(fields, ',')) AS field_name
-                ) AS split_fields
-                WHERE trim(field_name) <> ''
-            ),
-            fieldids AS (
-                SELECT fts_fields.fieldid
-                FROM %fts_schema%.fields AS fts_fields
-                WHERE CASE WHEN fields IS NULL THEN 1 ELSE fts_fields.field IN (SELECT requested_fields.field FROM requested_fields) END
-            ),
             qtermids AS (
                 SELECT termid
                 FROM %fts_schema%.dict AS dict,
@@ -583,61 +890,57 @@ static string MatchMacroScript() {
             ),
             qterms AS (
                 SELECT termid,
-                       docid
+                       docid,
+                       fieldid
                 FROM %fts_schema%.terms AS terms
-                WHERE CASE WHEN fields IS NULL THEN 1 ELSE fieldid IN (SELECT * FROM fieldids) END
+                WHERE fieldid IN (SELECT fieldid FROM field_config)
                   AND termid IN (SELECT qtermids.termid FROM qtermids)
             ),
-            term_tf AS (
-                SELECT termid,
-                       docid,
-                       COUNT(*) AS tf
-                FROM qterms
-                GROUP BY docid,
-                         termid
-            ),
-            cdocs AS (
-                SELECT docid
-                FROM qterms
-                GROUP BY docid
-                HAVING CASE WHEN conjunctive THEN COUNT(DISTINCT termid) = (SELECT COUNT(*) FROM tokens) ELSE 1 END
-            ),
-            subscores AS (
-                SELECT docs.docid,
-                       len,
-                       term_tf.termid,
-                       tf,
-                       df,
-                       (log(((SELECT num_docs FROM %fts_schema%.stats) - df + 0.5) / (df + 0.5) + 1) * ((tf * (k + 1)/(tf + k * (1 - b + b * (len / (SELECT avgdl FROM %fts_schema%.stats))))))) AS subscore
-                FROM term_tf,
-                     cdocs,
-                     %fts_schema%.docs AS docs,
-                     %fts_schema%.dict AS dict
-                WHERE term_tf.docid = cdocs.docid
-                  AND term_tf.docid = docs.docid
-                  AND term_tf.termid = dict.termid
-            ),
-            scores AS (
-                SELECT docid,
-                       sum(subscore) AS score
-                FROM subscores
-                GROUP BY docid
-            )
-            SELECT score
-            FROM scores,
-                 %fts_schema%.docs AS docs
-            WHERE scores.docid = docs.docid
-              AND docs.name = docname
-        );
+			cdocs AS (
+				SELECT docid
+				FROM qterms
+				GROUP BY docid
+				HAVING CASE WHEN conjunctive THEN COUNT(DISTINCT termid) = (SELECT COUNT(*) FROM tokens) ELSE 1 END
+			),
+			field_term_tf AS (
+				SELECT qterms.termid,
+				       NULL::BIGINT AS rawtermid,
+				       qterms.docid,
+				       qterms.fieldid,
+				       dict.df,
+				       1.0::DOUBLE AS expansion_weight,
+				       count(*) AS tf
+				FROM qterms
+				JOIN cdocs ON cdocs.docid = qterms.docid
+				JOIN %fts_schema%.dict AS dict ON dict.termid = qterms.termid
+				GROUP BY qterms.docid,
+				         qterms.fieldid,
+				         qterms.termid,
+				         dict.df
+			),
+				%field_scoring_score_ctes%
+				SELECT score
+				FROM scores,
+				     %fts_schema%.docs AS docs
+				WHERE scores.docid = docs.docid
+	              AND docs.name = docname
+	            UNION ALL
+	            SELECT error(message)::DOUBLE
+	            FROM validation_errors
+	        );
     )";
   // clang-format on
+  result = StringUtil::Replace(result, "%field_scoring_config_ctes%",
+                               FieldScoringConfigCTEs());
+  return StringUtil::Replace(result, "%field_scoring_score_ctes%",
+                             FieldScoringScoreCTEs());
 }
 
 static string LayeredSearchTableMacroScript() {
   // clang-format off
-	return R"(
-        CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard') AS TABLE
-            WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, enable_fuzzy, enable_short_fuzzy, expand_exact_terms, query_mode) AS (
+	string result = R"(
+			CREATE MACRO %fts_schema%.search_layered_bm25(query_string, fields := NULL, top_k := 50, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard', field_weights := NULL, field_b := NULL, scoring_model := 'bm25f', tie_breaker := 0.0) AS TABLE
+				WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, enable_fuzzy, enable_short_fuzzy, expand_exact_terms, query_mode, field_weights, field_b, scoring_model, tie_breaker, default_b) AS (
                 SELECT term_limit::BIGINT,
                        max_df_ratio::DOUBLE,
                        max_df::BIGINT,
@@ -650,8 +953,14 @@ static string LayeredSearchTableMacroScript() {
                            WHEN 'standard' THEN 'standard'
                            WHEN 'autocomplete' THEN 'autocomplete'
                            ELSE error('query_mode must be either standard or autocomplete')
-                       END
-            ),
+				       END,
+				       field_weights::MAP(VARCHAR, DOUBLE),
+				       field_b::MAP(VARCHAR, DOUBLE),
+				       lower(scoring_model::VARCHAR),
+				       tie_breaker::DOUBLE,
+				       b::DOUBLE
+			),
+			%field_scoring_config_ctes%
             df_cap(max_df) AS (
                 SELECT least(params.max_df, ceil(stats.num_docs * params.max_df_ratio)::BIGINT)
                 FROM %fts_schema%.stats AS stats
@@ -986,21 +1295,11 @@ static string LayeredSearchTableMacroScript() {
                          termid,
                          rawtermid
             ),
-            fieldids AS (
-                SELECT fts_fields.fieldid
-                FROM %fts_schema%.fields AS fts_fields
-                WHERE CASE WHEN fields IS NULL THEN true ELSE fts_fields.field IN (
-                    SELECT trim(field_name) AS field
-                    FROM (
-                        SELECT unnest(string_split(fields, ',')) AS field_name
-                    ) AS split_fields
-                    WHERE trim(field_name) <> ''
-                ) END
-            ),
-            term_tf AS (
+			field_term_tf AS (
                 SELECT selected_terms.termid,
                        selected_terms.rawtermid,
                        terms.docid,
+                       terms.fieldid,
                        selected_terms.df,
                        max(selected_terms.expansion_weight) AS expansion_weight,
                        count(*) AS tf
@@ -1011,55 +1310,49 @@ static string LayeredSearchTableMacroScript() {
                      selected_terms.rawtermid IS NULL
                      OR terms.rawtermid = selected_terms.rawtermid
                  )
-                WHERE terms.fieldid IN (SELECT fieldid FROM fieldids)
+                WHERE terms.fieldid IN (SELECT fieldid FROM field_config)
                 GROUP BY selected_terms.termid,
                          selected_terms.rawtermid,
                          terms.docid,
+                         terms.fieldid,
                          selected_terms.df
             ),
-            scores AS (
-                SELECT docs.name AS docname,
-                       sum(
-                           term_tf.expansion_weight
-                           * log(((((stats.num_docs - term_tf.df) + 0.5) / (term_tf.df + 0.5)) + 1))
-                           * (
-                               (term_tf.tf * (k + 1))
-                               / (
-                                   term_tf.tf
-                                   + (
-                                       k
-                                       * ((1 - b) + (b * (docs.len / stats.avgdl)))
-                                   )
-                               )
-                           )
-                       ) AS score
-                FROM term_tf
-                JOIN %fts_schema%.docs AS docs
-                  ON docs.docid = term_tf.docid
-                CROSS JOIN %fts_schema%.stats AS stats
-                GROUP BY docs.name
+			%field_scoring_score_ctes%,
+			ranked AS (
+				SELECT docs.name AS docname,
+				       scores.score,
+				       row_number() OVER (ORDER BY scores.score DESC, docs.name) AS rank
+				FROM scores
+				JOIN %fts_schema%.docs AS docs ON docs.docid = scores.docid
             ),
-            ranked AS (
+            results AS (
                 SELECT docname,
                        score,
-                       row_number() OVER (ORDER BY score DESC, docname) AS rank
-                FROM scores
+                       rank
+                FROM ranked
+                WHERE top_k IS NULL
+                   OR rank <= top_k
             )
-            SELECT docname,
-                   score,
-                   rank
-            FROM ranked
-            WHERE top_k IS NULL
-               OR rank <= top_k
+            SELECT *
+            FROM results
+            UNION ALL
+            SELECT error(message)::VARCHAR AS docname,
+                   NULL::DOUBLE AS score,
+                   NULL::BIGINT AS rank
+            FROM validation_errors
             ORDER BY rank;
     )";
   // clang-format on
+  result = StringUtil::Replace(result, "%field_scoring_config_ctes%",
+                               FieldScoringConfigCTEs());
+  return StringUtil::Replace(result, "%field_scoring_score_ctes%",
+                             FieldScoringScoreCTEs());
 }
 
 static string LayeredMatchMacroScript() {
   // clang-format off
 	return R"(
-        CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard') AS (
+			CREATE MACRO %fts_schema%.match_layered_bm25(input_id, query_string, fields := NULL, k := 1.2, b := 0.75, term_limit := 32, max_df_ratio := 0.15, max_df := 50000, enable_prefix := true, enable_substring := true, enable_fuzzy := true, enable_short_fuzzy := true, expand_exact_terms := false, query_mode := 'standard', field_weights := NULL, field_b := NULL, scoring_model := 'bm25f', tie_breaker := 0.0) AS (
             SELECT score
             FROM %fts_schema%.search_layered_bm25(
                 query_string,
@@ -1075,7 +1368,11 @@ static string LayeredMatchMacroScript() {
                 enable_fuzzy := enable_fuzzy,
                 enable_short_fuzzy := enable_short_fuzzy,
                 expand_exact_terms := expand_exact_terms,
-                query_mode := query_mode
+				query_mode := query_mode,
+				field_weights := field_weights,
+				field_b := field_b,
+				scoring_model := scoring_model,
+				tie_breaker := tie_breaker
             ) AS hits
             WHERE hits.docname = input_id
         );
@@ -1540,7 +1837,7 @@ static string InsertTriggerScript(const QualifiedName &qname,
         CREATE TRIGGER %trigger_00_docs% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
-            INSERT INTO %fts_schema%.docs (docid, name, len)
+            INSERT INTO %fts_schema%.docs (docid, name, len, field_lens)
             WITH %docs_new_docs_cte%,
             tokenized AS (
                 %union_fields_query%
@@ -1555,15 +1852,18 @@ static string InsertTriggerScript(const QualifiedName &qname,
                   AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
             ),
             lengths AS (
-                SELECT docid, count(term) AS len
+                SELECT docid,
+                       count(*)::BIGINT AS len,
+                       %field_length_aggregates% AS field_lens
                 FROM stemmed_stopped
                 GROUP BY docid
             )
             SELECT nd.docid,
                    nd.name,
-                   COALESCE(l.len, 0) AS len
+                   coalesce(lengths.len, 0)::BIGINT AS len,
+                   coalesce(lengths.field_lens, %zero_field_lengths%)::BIGINT[] AS field_lens
             FROM fts_new_docs AS nd
-            LEFT JOIN lengths AS l ON nd.docid = l.docid;
+            LEFT JOIN lengths ON lengths.docid = nd.docid;
 
         CREATE TRIGGER %trigger_10_dict_insert% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
@@ -1617,9 +1917,7 @@ static string InsertTriggerScript(const QualifiedName &qname,
         CREATE TRIGGER %trigger_40_stats% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
-            UPDATE %fts_schema%.stats
-            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
-                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
+            %stats_delta_update%;
     )";
   // clang-format on
 
@@ -1653,6 +1951,14 @@ static string InsertTriggerScript(const QualifiedName &qname,
       StringUtil::Replace(result, "%union_fields_query%",
                           StringUtil::Join(tokenize_fields, " UNION ALL "));
   result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
+  result = StringUtil::Replace(result, "%field_length_aggregates%",
+                               FieldLengthAggregateList(input_values.size()));
+  result =
+      StringUtil::Replace(result, "%zero_field_lengths%",
+                          ZeroFieldLengthList(input_values.size(), "BIGINT"));
+  result =
+      StringUtil::Replace(result, "%stats_delta_update%",
+                          StatsDeltaUpdateStatement(input_values.size(), true));
   result = StringUtil::Replace(
       result, "%layered_insert_new_terms_triggers%",
       layered_search ? LayeredInsertNewTermsTriggerScript(qname, token_ctes)
@@ -1746,7 +2052,7 @@ static string ClusteredInsertTriggerScript(const QualifiedName &qname,
         CREATE TRIGGER %trigger_00_docs% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
-            INSERT INTO %fts_schema%.docs (docid, name, len)
+            INSERT INTO %fts_schema%.docs (docid, name, len, field_lens)
             WITH %docs_new_docs_cte%,
             tokenized AS (
                 %union_fields_query%
@@ -1761,15 +2067,18 @@ static string ClusteredInsertTriggerScript(const QualifiedName &qname,
                   AND t.w NOT IN (SELECT sw FROM %fts_schema%.stopwords)
             ),
             lengths AS (
-                SELECT docid, count(term) AS len
+                SELECT docid,
+                       count(*)::BIGINT AS len,
+                       %field_length_aggregates% AS field_lens
                 FROM stemmed_stopped
                 GROUP BY docid
             )
             SELECT nd.docid,
                    nd.name,
-                   COALESCE(l.len, 0) AS len
+                   coalesce(lengths.len, 0)::BIGINT AS len,
+                   coalesce(lengths.field_lens, %zero_field_lengths%)::BIGINT[] AS field_lens
             FROM fts_new_docs AS nd
-            LEFT JOIN lengths AS l ON nd.docid = l.docid;
+            LEFT JOIN lengths ON lengths.docid = nd.docid;
 
         CREATE TRIGGER %trigger_10_dict_insert% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
@@ -1816,9 +2125,7 @@ static string ClusteredInsertTriggerScript(const QualifiedName &qname,
         CREATE TRIGGER %trigger_40_stats% AFTER INSERT ON %input_table%
         REFERENCING NEW TABLE AS fts_new_rows
         FOR EACH STATEMENT
-            UPDATE %fts_schema%.stats
-            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
-                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
+            %stats_delta_update%;
     )";
   // clang-format on
 
@@ -1852,6 +2159,14 @@ static string ClusteredInsertTriggerScript(const QualifiedName &qname,
       StringUtil::Replace(result, "%union_fields_query%",
                           StringUtil::Join(tokenize_fields, " UNION ALL "));
   result = StringUtil::Replace(result, "%token_ctes%", token_ctes);
+  result = StringUtil::Replace(result, "%field_length_aggregates%",
+                               FieldLengthAggregateList(input_values.size()));
+  result =
+      StringUtil::Replace(result, "%zero_field_lengths%",
+                          ZeroFieldLengthList(input_values.size(), "BIGINT"));
+  result =
+      StringUtil::Replace(result, "%stats_delta_update%",
+                          StatsDeltaUpdateStatement(input_values.size(), true));
   result = StringUtil::Replace(result, "%terms_storage_table%",
                                GetFTSTermsStorageTable());
 
@@ -1925,6 +2240,11 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                 JOIN fts_old_rows AS old_rows ON d.name = old_rows.%input_id%
             );
 
+        CREATE TRIGGER %trigger_15_stats% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            %stats_delta_update%;
+
         CREATE TRIGGER %trigger_20_docs% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
         FOR EACH STATEMENT
@@ -1939,12 +2259,6 @@ static string DeleteTriggerScript(const QualifiedName &qname,
             DELETE FROM %fts_schema%.dict
             WHERE df = 0;
 
-        CREATE TRIGGER %trigger_40_stats% AFTER DELETE ON %input_table%
-        REFERENCING OLD TABLE AS fts_old_rows
-        FOR EACH STATEMENT
-            UPDATE %fts_schema%.stats
-            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
-                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
   )";
   // clang-format on
 
@@ -1963,11 +2277,11 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                                SQLIdentifier::ToString(trigger_names[0]));
   result = StringUtil::Replace(result, "%trigger_10_terms%",
                                SQLIdentifier::ToString(trigger_names[1]));
-  result = StringUtil::Replace(result, "%trigger_20_docs%",
+  result = StringUtil::Replace(result, "%trigger_15_stats%",
                                SQLIdentifier::ToString(trigger_names[2]));
-  result = StringUtil::Replace(result, "%trigger_30_dict_prune%",
+  result = StringUtil::Replace(result, "%trigger_20_docs%",
                                SQLIdentifier::ToString(trigger_names[3]));
-  result = StringUtil::Replace(result, "%trigger_40_stats%",
+  result = StringUtil::Replace(result, "%trigger_30_dict_prune%",
                                SQLIdentifier::ToString(trigger_names[4]));
   result = StringUtil::Replace(
       result, "%layered_delete_before_terms_triggers%",
@@ -1979,13 +2293,17 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                      : "");
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
+  result = StringUtil::Replace(
+      result, "%stats_delta_update%",
+      StatsDeltaUpdateStatement(input_values.size(), false));
   result = StringUtil::Replace(result, "%input_id%",
                                SQLIdentifier::ToString(input_id));
   return result;
 }
 
 static string ClusteredDeleteTriggerScript(const QualifiedName &qname,
-                                           const string &input_id) {
+                                           const string &input_id,
+                                           idx_t field_count) {
   // clang-format off
 	string result = R"(
         CREATE TRIGGER %trigger_00_dict_df% AFTER DELETE ON %input_table%
@@ -2013,6 +2331,11 @@ static string ClusteredDeleteTriggerScript(const QualifiedName &qname,
                 JOIN fts_old_rows AS old_rows ON d.name = old_rows.%input_id%
             );
 
+        CREATE TRIGGER %trigger_15_stats% AFTER DELETE ON %input_table%
+        REFERENCING OLD TABLE AS fts_old_rows
+        FOR EACH STATEMENT
+            %stats_delta_update%;
+
         CREATE TRIGGER %trigger_20_docs% AFTER DELETE ON %input_table%
         REFERENCING OLD TABLE AS fts_old_rows
         FOR EACH STATEMENT
@@ -2025,12 +2348,6 @@ static string ClusteredDeleteTriggerScript(const QualifiedName &qname,
             DELETE FROM %fts_schema%.dict
             WHERE df = 0;
 
-        CREATE TRIGGER %trigger_40_stats% AFTER DELETE ON %input_table%
-        REFERENCING OLD TABLE AS fts_old_rows
-        FOR EACH STATEMENT
-            UPDATE %fts_schema%.stats
-            SET num_docs = (SELECT COUNT(docid) FROM %fts_schema%.docs),
-                avgdl = (SELECT SUM(len) / COUNT(len) FROM %fts_schema%.docs);
     )";
   // clang-format on
 
@@ -2039,16 +2356,18 @@ static string ClusteredDeleteTriggerScript(const QualifiedName &qname,
                                SQLIdentifier::ToString(trigger_names[0]));
   result = StringUtil::Replace(result, "%trigger_10_terms_store%",
                                SQLIdentifier::ToString(trigger_names[1]));
-  result = StringUtil::Replace(result, "%trigger_20_docs%",
+  result = StringUtil::Replace(result, "%trigger_15_stats%",
                                SQLIdentifier::ToString(trigger_names[2]));
-  result = StringUtil::Replace(result, "%trigger_30_dict_prune%",
+  result = StringUtil::Replace(result, "%trigger_20_docs%",
                                SQLIdentifier::ToString(trigger_names[3]));
-  result = StringUtil::Replace(result, "%trigger_40_stats%",
+  result = StringUtil::Replace(result, "%trigger_30_dict_prune%",
                                SQLIdentifier::ToString(trigger_names[4]));
   result = StringUtil::Replace(result, "%terms_storage_table%",
                                GetFTSTermsStorageTable());
   result = StringUtil::Replace(result, "%input_table%",
                                GetQualifiedTableName(qname));
+  result = StringUtil::Replace(result, "%stats_delta_update%",
+                               StatsDeltaUpdateStatement(field_count, false));
   result = StringUtil::Replace(result, "%input_id%",
                                SQLIdentifier::ToString(input_id));
   return result;
@@ -2091,7 +2410,8 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
     } else if (cluster_terms) {
       result += ClusteredIncrementalIndexSetupScript();
       result += ClusteredInsertTriggerScript(qname, input_id, input_values);
-      result += ClusteredDeleteTriggerScript(qname, input_id);
+      result +=
+          ClusteredDeleteTriggerScript(qname, input_id, input_values.size());
     } else {
       result +=
           InsertTriggerScript(qname, input_id, input_values, layered_search);

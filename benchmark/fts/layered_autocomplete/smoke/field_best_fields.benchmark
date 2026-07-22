@@ -1,0 +1,7 @@
+template benchmark/fts/layered_autocomplete/templates/field_scoring.benchmark.in
+display_name=FTS layered best-fields query (50K)
+rows=50000
+scoring_model=best_fields
+tie_breaker=0.1
+title_b=0.2
+body_b=0.9

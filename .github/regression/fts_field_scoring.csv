@@ -1,0 +1,3 @@
+benchmark/fts/layered_autocomplete/smoke/field_bm25f.benchmark
+benchmark/fts/layered_autocomplete/smoke/field_bm25f_normalization.benchmark
+benchmark/fts/layered_autocomplete/smoke/field_best_fields.benchmark
