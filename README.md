@@ -40,7 +40,7 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `tokenizer` | `VARCHAR` | Tokenizer to use. `'regex'` keeps the legacy regex-split behavior. `'opensearch_standard'` uses an OpenSearch/Lucene standard-tokenizer compatibility mode that splits Han, Hiragana, and Katakana into single-character tokens while preserving word runs for scripts such as Hebrew, Cyrillic, Arabic, Latin, and Hangul. Defaults to `'regex'` |
 | `stopwords` | `VARCHAR` | Qualified name of table containing a single `VARCHAR` column containing the desired stopwords, or `'none'` if no stopwords are to be used. Defaults to `'english'` for a pre-defined list of 571 English stopwords |
 | `ignore` | `VARCHAR` | Regular expression of patterns to be ignored by the `'regex'` tokenizer. Defaults to a punctuation and digit pattern |
-| `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` |
+| `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` for `'regex'` and `0` for `'opensearch_standard'`. `strip_accents=true` is not supported with `'opensearch_standard'` because OpenSearch's standard analyzer lowercases tokens but does not strip accents |
 | `lower` | `BOOLEAN` | Whether to convert all text to lowercase. Defaults to `1` |
 | `overwrite` | `BOOLEAN` | Whether to overwrite an existing index on a table. Defaults to `0` |
 | `incremental` | `BOOLEAN` | Whether to maintain the FTS index with triggers after inserts and deletes on the input table. Defaults to `0` |

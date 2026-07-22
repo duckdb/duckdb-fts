@@ -27,6 +27,12 @@ static bool IsOpenSearchStandardEmoji(UChar32 codepoint) {
          u_hasBinaryProperty(codepoint, UCHAR_EXTENDED_PICTOGRAPHIC);
 }
 
+static bool IsOpenSearchStandardCombiningMark(UChar32 codepoint) {
+  auto char_type = u_charType(codepoint);
+  return char_type == U_NON_SPACING_MARK ||
+         char_type == U_COMBINING_SPACING_MARK || char_type == U_ENCLOSING_MARK;
+}
+
 static bool IsOpenSearchStandardIntraTokenPunctuation(UChar32 codepoint) {
   return codepoint == '\'' || codepoint == 0x2019 || codepoint == '.' ||
          codepoint == '_';
@@ -50,7 +56,8 @@ static bool IsOpenSearchStandardContinuationChar(UChar32 codepoint,
                                                  UScriptCode script) {
   return !IsOpenSearchStandardSingleTokenScript(script) &&
          !IsOpenSearchStandardEmoji(codepoint) &&
-         IsOpenSearchStandardTokenChar(codepoint, script);
+         (IsOpenSearchStandardTokenChar(codepoint, script) ||
+          IsOpenSearchStandardCombiningMark(codepoint));
 }
 
 template <class LIST_WRITER>
@@ -95,8 +102,16 @@ static void TokenizeOpenSearchStandard(string_t input, LIST_WRITER &list) {
       continue;
     }
 
-    if (IsOpenSearchStandardSingleTokenScript(script) ||
-        IsOpenSearchStandardEmoji(codepoint)) {
+    // Proper OpenSearch parity should delegate word boundary detection to
+    // Lucene's StandardTokenizer or ICU UBRK_WORD. DuckDB's bundled ICU build
+    // currently disables break iteration, so this scanner keeps the known
+    // OpenSearch-compatible cases local. Combining marks are continuations to
+    // preserve decomposed accents such as "cafe\u0301" rather than splitting or
+    // dropping the mark.
+    if (IsOpenSearchStandardCombiningMark(codepoint) && token_size > 0) {
+      token_size += UnsafeNumericCast<idx_t>(char_size);
+    } else if (IsOpenSearchStandardSingleTokenScript(script) ||
+               IsOpenSearchStandardEmoji(codepoint)) {
       flush_token();
       list.WriteElement().WriteStringRef(
           string_t(input_data + pos, UnsafeNumericCast<uint32_t>(char_size)));
