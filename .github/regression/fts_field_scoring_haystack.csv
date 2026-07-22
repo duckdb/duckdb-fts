@@ -1,2 +1,3 @@
-benchmark/fts/layered_autocomplete/haystack/field_weighted_sum.benchmark
+benchmark/fts/layered_autocomplete/haystack/field_bm25f.benchmark
+benchmark/fts/layered_autocomplete/haystack/field_bm25f_normalization.benchmark
 benchmark/fts/layered_autocomplete/haystack/field_best_fields.benchmark
