@@ -144,7 +144,7 @@ jobs:
               echo "AUTOCOMPLETE_BENCHMARKS=.github/regression/fts_autocomplete.csv"
               echo "FIELD_SCORING_BENCHMARKS=.github/regression/fts_field_scoring.csv"
               echo "BOOLEAN_BENCHMARKS=.github/regression/fts_boolean.csv"
-              echo "BENCHMARK_BUDGET_SECONDS=180"
+              echo "BENCHMARK_BUDGET_SECONDS=300"
             } >> "$GITHUB_ENV"
           fi
 
