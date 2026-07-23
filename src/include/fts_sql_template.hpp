@@ -7,7 +7,6 @@ namespace duckdb {
 struct SQLTemplateAsset {
   const char *source;
   const char *sql;
-  const char *hash;
 };
 
 class SQLTemplateArgument {

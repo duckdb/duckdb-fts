@@ -46,8 +46,7 @@ function(generate_fts_sql_assets output_directory)
     string(APPEND source_content
            "const SQLTemplateAsset ${asset_name} = {\n"
            "    \"${asset_relative_path}\",\n"
-           "    R\"${raw_delimiter}(${asset_sql})${raw_delimiter}\",\n"
-           "    \"${asset_hash}\"};\n\n")
+           "    R\"${raw_delimiter}(${asset_sql})${raw_delimiter}\"};\n\n")
   endforeach()
 
   string(APPEND header_content "\n} // namespace fts_sql\n} // namespace duckdb\n")
@@ -58,6 +57,5 @@ function(generate_fts_sql_assets output_directory)
   _fts_write_if_different("${header_path}" header_content)
   _fts_write_if_different("${source_path}" source_content)
 
-  set(FTS_SQL_ASSETS_HEADER "${header_path}" PARENT_SCOPE)
   set(FTS_SQL_ASSETS_SOURCE "${source_path}" PARENT_SCOPE)
 endfunction()
