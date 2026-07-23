@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/boolean_query.benchmark.in
+display_name=FTS Boolean exclusion query (50K)
+rows=50000
+query_json={"must":[{"query":"northstar","fields":["body"]}],"must_not":[{"query":"runner","fields":["body"]}]}

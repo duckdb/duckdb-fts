@@ -198,6 +198,94 @@ average lengths in the statistics row. Existing indexes created by an older
 extension version must be dropped and rebuilt before field-aware scoring can be
 used.
 
+### Structured Boolean Layered Search
+
+```python
+search_layered_bm25_query(query, top_k := 50, k := 1.2, b := 0.75,
+                          term_limit := 32, max_df_ratio := 0.15,
+                          max_df := 50000, enable_prefix := true,
+                          enable_substring := true, enable_fuzzy := true,
+                          enable_short_fuzzy := true,
+                          expand_exact_terms := false,
+                          field_weights := NULL, field_b := NULL,
+                          scoring_model := 'bm25f', tie_breaker := 0.0,
+                          max_leaf_clauses := 1024,
+                          max_boolean_depth := 64)
+
+match_layered_bm25_query(input_id, query, k := 1.2, b := 0.75,
+                         term_limit := 32, max_df_ratio := 0.15,
+                         max_df := 50000, enable_prefix := true,
+                         enable_substring := true, enable_fuzzy := true,
+                         enable_short_fuzzy := true,
+                         expand_exact_terms := false,
+                         field_weights := NULL, field_b := NULL,
+                         scoring_model := 'bm25f', tie_breaker := 0.0,
+                         max_leaf_clauses := 1024,
+                         max_boolean_depth := 64)
+```
+
+These macros accept a JSON query tree. Load DuckDB's `json` extension before
+creating a layered index to install the structured macros together with the
+index. For a layered index that already exists, or one created before `json`
+was loaded, load `json` and run
+`PRAGMA create_fts_boolean_query_macros('table_name')`; this installs only the
+macros and does not rebuild the index. A node is either a leaf with `query` or a
+Boolean group containing `must`, `should`, and `must_not` arrays:
+
+```sql
+LOAD json;
+
+SELECT docname, score, rank
+FROM fts_main_animal_sounds.search_layered_bm25_query(
+    '{
+        "must": [
+            {"query": "quack", "fields": ["text_content"]}
+        ],
+        "should": [
+            {
+                "query": "han",
+                "fields": ["author"],
+                "query_mode": "autocomplete",
+                "boost": 2.0
+            }
+        ],
+        "must_not": [
+            {"query": "archive"}
+        ],
+        "minimum_should_match": 0
+    }'::JSON,
+    top_k := 10
+);
+```
+
+Every `must` clause must match and any matching `must_not` clause excludes the
+document. A should-only group requires one matching clause by default; a group
+with at least one `must` clause defaults to zero. An explicit
+`minimum_should_match` counts direct `should` children. Positive child scores
+are added and then multiplied by the group's optional `boost`. Leaf boosts are
+applied to the leaf BM25 score first.
+
+Leaves can select indexed fields with a JSON string array and choose `standard`
+or `autocomplete` query mode independently. Expansion controls and field
+scoring configuration remain macro-level settings so all leaves share the same
+resource limits and field model. `scoring_model := 'bm25f'` uses canonical
+BM25F with optional `field_weights` and per-field length normalization through
+`field_b`; `best_fields` selects the strongest field and optionally incorporates
+the others through `tie_breaker`. Each leaf delegates to `search_layered_bm25`,
+then the Boolean layer combines the resulting scores. The structured layer
+reuses the existing layered index and does not add tables or require an index
+rebuild.
+
+By default, query trees are limited to 1,024 leaves and a maximum Boolean depth
+of 64. Callers can lower or raise these resource limits with
+`max_leaf_clauses` and `max_boolean_depth`; passing `NULL` disables the
+corresponding extension-level limit. The Boolean tree is evaluated recursively,
+so these are resource controls rather than fixed SQL-plan limits. Empty groups,
+pure-negative groups, unknown keys, mixed leaf/group nodes, invalid boosts, and
+out-of-range `minimum_should_match` values are rejected. Setting
+`minimum_should_match` explicitly to zero on a should-only group matches all
+indexed documents; documents that match no optional leaf receive score `0`.
+
 ### `stem` Function
 
 ```python

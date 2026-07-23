@@ -58,6 +58,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes ccache ninja-build
 
+      - uses: ./duckdb/.github/actions/ccache-action
+        with:
+          key: fts-regression-runners
+
       - name: Build current benchmark runner
         env:
           BUILD_BENCHMARK: 1
@@ -135,6 +139,7 @@ jobs:
               echo "LAYERED_BENCHMARKS=.github/regression/fts_layered_haystack.csv"
               echo "AUTOCOMPLETE_BENCHMARKS=.github/regression/fts_autocomplete_haystack.csv"
               echo "FIELD_SCORING_BENCHMARKS=.github/regression/fts_field_scoring_haystack.csv"
+              echo "BOOLEAN_BENCHMARKS=.github/regression/fts_boolean_haystack.csv"
               echo "BENCHMARK_BUDGET_SECONDS=3600"
             } >> "$GITHUB_ENV"
           else
@@ -142,7 +147,8 @@ jobs:
               echo "LAYERED_BENCHMARKS=.github/regression/fts_layered.csv"
               echo "AUTOCOMPLETE_BENCHMARKS=.github/regression/fts_autocomplete.csv"
               echo "FIELD_SCORING_BENCHMARKS=.github/regression/fts_field_scoring.csv"
-              echo "BENCHMARK_BUDGET_SECONDS=180"
+              echo "BOOLEAN_BENCHMARKS=.github/regression/fts_boolean.csv"
+              echo "BENCHMARK_BUDGET_SECONDS=300"
             } >> "$GITHUB_ENV"
           fi
 
@@ -185,10 +191,22 @@ jobs:
               --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee field-scoring-smoke.log
+
+            # Move this list to the base-versus-current invocation after the
+            # structured-query macros are available on the merge base.
+            python3 duckdb/scripts/regression/test_runner.py \
+              --old "$NEW_RUNNER" \
+              --new "$NEW_RUNNER" \
+              --benchmarks "$BOOLEAN_BENCHMARKS" \
+              --root-dir . \
+              --threads 2 \
+              --clear-benchmark-cache \
+              --nofail \
+              --verbose 2>&1 | tee boolean-smoke.log
           }
 
           export -f run_benchmarks
-          export OLD_RUNNER NEW_RUNNER LAYERED_BENCHMARKS AUTOCOMPLETE_BENCHMARKS FIELD_SCORING_BENCHMARKS
+          export OLD_RUNNER NEW_RUNNER LAYERED_BENCHMARKS AUTOCOMPLETE_BENCHMARKS FIELD_SCORING_BENCHMARKS BOOLEAN_BENCHMARKS
           timeout "${BENCHMARK_BUDGET_SECONDS}s" bash -c run_benchmarks
 
       - name: Add timing output to job summary
@@ -207,6 +225,10 @@ jobs:
             echo '```text'
             test ! -f field-scoring-smoke.log || cat field-scoring-smoke.log
             echo '```'
+            echo '## FTS Boolean-query smoke'
+            echo '```text'
+            test ! -f boolean-smoke.log || cat boolean-smoke.log
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark logs
@@ -218,4 +240,5 @@ jobs:
             layered-regression.log
             autocomplete-smoke.log
             field-scoring-smoke.log
+            boolean-smoke.log
           if-no-files-found: ignore

@@ -1,0 +1,46 @@
+name ${display_name}
+group fts
+subgroup boolean-query
+
+require fts
+require json
+
+init
+CREATE TABLE documents(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR);
+INSERT INTO documents
+SELECT 'doc' || lpad(i::VARCHAR, 12, '0') AS id,
+       'record category' || (i % 100)::VARCHAR || ' region' || (i % 20)::VARCHAR AS title,
+       'workspace item search benchmark ' ||
+           CASE i % 20
+               WHEN 0 THEN 'northstar prefixalpha running'
+               WHEN 1 THEN 'northstar prefixbeta runner'
+               WHEN 2 THEN 'southstar infixalpha runnable'
+               WHEN 3 THEN 'eaststar prefixgamma running'
+               WHEN 4 THEN 'weststar infixbeta runner'
+               ELSE 'baseline catalog archive'
+           END || ' ' || substr(md5(i::VARCHAR), 1, 16) AS body
+FROM range(${rows}) AS source(i);
+
+load
+PRAGMA create_fts_index('documents', 'id', 'title', 'body', stemmer='porter', stopwords='none', layered_search=true, incremental=true);
+
+assert I
+SELECT count(*) > 0
+FROM (
+    SELECT fts_main_documents.match_layered_bm25_query(id, '${query_json}'::JSON) AS score
+    FROM documents
+) AS scored
+WHERE score IS NOT NULL
+----
+true
+
+run
+SELECT id, score
+FROM (
+    SELECT id,
+           fts_main_documents.match_layered_bm25_query(id, '${query_json}'::JSON) AS score
+    FROM documents
+) AS scored
+WHERE score IS NOT NULL
+ORDER BY score DESC
+LIMIT 50;

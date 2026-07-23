@@ -529,3 +529,19 @@ FROM fts_main_autocomplete_docs.search_layered_bm25(
 )
 ----
 doc2
+
+# Existing layered indexes can install the structured macros after JSON loads.
+statement ok
+LOAD json
+
+statement ok
+PRAGMA create_fts_boolean_query_macros('documents')
+
+query I
+SELECT docname
+FROM fts_main_documents.search_layered_bm25_query(
+    '{"query":"quack","fields":["body"]}'::JSON,
+    enable_short_fuzzy := false
+)
+----
+doc1
