@@ -24,7 +24,26 @@ set(FTS_SQL_ASSETS
     "SEARCH_LAYERED_BM25|src/sql/query/search_layered_bm25.sql"
     "MATCH_LAYERED_BM25|src/sql/query/match_layered_bm25.sql"
     "SEARCH_LAYERED_BM25_QUERY|src/sql/query/search_layered_bm25_query.sql"
-    "MATCH_LAYERED_BM25_QUERY|src/sql/query/match_layered_bm25_query.sql")
+    "MATCH_LAYERED_BM25_QUERY|src/sql/query/match_layered_bm25_query.sql"
+    "INCREMENTAL_INDEX_SETUP|src/sql/maintenance/incremental_index_setup.sql"
+    "CLUSTERED_INCREMENTAL_INDEX_SETUP|src/sql/maintenance/clustered_incremental_index_setup.sql"
+    "STATS_DELTA_UPDATE|src/sql/maintenance/stats_delta_update.sql"
+    "LAYERED_AFFECTED_TERM_IDS|src/sql/maintenance/layered_affected_term_ids.sql"
+    "LAYERED_INSERT_NEW_TERMS|src/sql/maintenance/layered_insert_new_terms.sql"
+    "LAYERED_INSERT_DF|src/sql/maintenance/layered_insert_df.sql"
+    "LAYERED_DELETE_BEFORE_TERMS|src/sql/maintenance/layered_delete_before_terms.sql"
+    "LAYERED_DELETE_AFTER_DF|src/sql/maintenance/layered_delete_after_df.sql"
+    "INSERT_DOCS_CTE|src/sql/maintenance/insert_docs_cte.sql"
+    "INSERT_TOKEN_DOCS_CTE|src/sql/maintenance/insert_token_docs_cte.sql"
+    "TOKENIZE_INSERTED_FIELD|src/sql/maintenance/tokenize_inserted_field.sql"
+    "LAYERED_INSERT_TOKEN_CTES|src/sql/maintenance/layered_insert_token_ctes.sql"
+    "INSERT_TRIGGERS|src/sql/maintenance/insert_triggers.sql"
+    "CLUSTERED_INSERT_TOKEN_CTES|src/sql/maintenance/clustered_insert_token_ctes.sql"
+    "CLUSTERED_INSERT_TRIGGERS|src/sql/maintenance/clustered_insert_triggers.sql"
+    "TOKENIZE_DELETED_FIELD|src/sql/maintenance/tokenize_deleted_field.sql"
+    "DELETE_TOKEN_CTES|src/sql/maintenance/delete_token_ctes.sql"
+    "DELETE_TRIGGERS|src/sql/maintenance/delete_triggers.sql"
+    "CLUSTERED_DELETE_TRIGGERS|src/sql/maintenance/clustered_delete_triggers.sql")
 include(cmake/GenerateFTSSQLAssets.cmake)
 generate_fts_sql_assets("${FTS_SQL_GENERATED_DIR}" ${FTS_SQL_ASSETS})
 
@@ -49,6 +68,9 @@ file(GLOB SNOWBALL_STEMMER_SOURCES CONFIGURE_DEPENDS ${SNOWBALL_BASE_FOLDER}/src
 
 set(EXTENSION_SOURCES
     ${EXTENSION_BASE_FOLDER}/fts_extension.cpp
+    ${EXTENSION_BASE_FOLDER}/fts_index_builder.cpp
+    ${EXTENSION_BASE_FOLDER}/fts_index_common.cpp
+    ${EXTENSION_BASE_FOLDER}/fts_index_maintenance.cpp
     ${EXTENSION_BASE_FOLDER}/fts_indexing.cpp
     ${EXTENSION_BASE_FOLDER}/fts_sql_template.cpp
     ${FTS_SQL_ASSETS_SOURCE}
