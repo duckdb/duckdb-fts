@@ -6,6 +6,12 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(FTSExtension)
 
 set(EXTENSION_BASE_FOLDER "src")
+set(FTS_SQL_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(FTS_SQL_ASSETS
+    "SCHEMA_SETUP|src/sql/index/schema_setup.sql")
+include(cmake/GenerateFTSSQLAssets.cmake)
+generate_fts_sql_assets("${FTS_SQL_GENERATED_DIR}" ${FTS_SQL_ASSETS})
+
 set(SNOWBALL_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/third_party/snowball")
 if(DEFINED DUCKDB_MODULE_BASE_DIR)
   set(DUCKDB_SOURCE_BASE_FOLDER "${DUCKDB_MODULE_BASE_DIR}")
@@ -15,6 +21,7 @@ endif()
 set(DUCKDB_ICU_BASE_FOLDER "${DUCKDB_SOURCE_BASE_FOLDER}/extension/icu")
 include_directories(
     ${EXTENSION_BASE_FOLDER}/include
+    ${FTS_SQL_GENERATED_DIR}
     ${SNOWBALL_BASE_FOLDER}/include
     ${SNOWBALL_BASE_FOLDER}/libstemmer
     ${SNOWBALL_BASE_FOLDER}/runtime
@@ -27,6 +34,8 @@ file(GLOB SNOWBALL_STEMMER_SOURCES CONFIGURE_DEPENDS ${SNOWBALL_BASE_FOLDER}/src
 set(EXTENSION_SOURCES
     ${EXTENSION_BASE_FOLDER}/fts_extension.cpp
     ${EXTENSION_BASE_FOLDER}/fts_indexing.cpp
+    ${EXTENSION_BASE_FOLDER}/fts_sql_template.cpp
+    ${FTS_SQL_ASSETS_SOURCE}
     ${SNOWBALL_BASE_FOLDER}/libstemmer/libstemmer.c
     ${SNOWBALL_BASE_FOLDER}/runtime/api.c
     ${SNOWBALL_BASE_FOLDER}/runtime/utilities.c

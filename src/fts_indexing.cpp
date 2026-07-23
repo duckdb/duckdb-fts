@@ -1,4 +1,6 @@
 #include "fts_indexing.hpp"
+#include "fts_sql_assets.hpp"
+#include "fts_sql_template.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
@@ -316,14 +318,15 @@ static bool ColumnHasNotNullConstraint(const TableCatalogEntry &table,
 // SQL script builder helpers
 // ---------------------------------------------------------------------------
 
-static string SchemaSetupScript() {
-  // clang-format off
-	return R"(
-        DROP SCHEMA IF EXISTS %fts_schema% CASCADE;
-        CREATE SCHEMA %fts_schema%;
-        CREATE TABLE %fts_schema%.stopwords (sw VARCHAR);
-    )";
-  // clang-format on
+static string SchemaSetupScript(const QualifiedName &qname) {
+  vector<string> schema_parts;
+  if (!IsInvalidCatalog(qname.Catalog())) {
+    schema_parts.push_back(qname.Catalog().GetIdentifierName());
+  }
+  schema_parts.push_back(GetFTSSchemaName(qname));
+  return RenderSQLTemplate(
+      fts_sql::SCHEMA_SETUP,
+      {{"fts_schema", SQLTemplateArgument::QualifiedIdentifier(schema_parts)}});
 }
 
 static string StopwordsScript(const string &stopwords) {
@@ -2906,7 +2909,7 @@ static string IndexingScript(ClientContext &context, QualifiedName &qname,
   if (TableExists(context, qname) && SupportsFTSTriggers(context, qname)) {
     result += DropFTSTriggersScript(qname);
   }
-  result += SchemaSetupScript();
+  result += SchemaSetupScript(qname);
   result += StopwordsScript(stopwords);
   result += TokenizeMacroScript(tokenizer, ignore, strip_accents, lower);
   result += IndexTablesScript(
