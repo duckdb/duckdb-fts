@@ -8,11 +8,3 @@ benchmark/fts/layered_autocomplete/smoke/layered_match.benchmark
 benchmark/fts/layered_autocomplete/smoke/base_match.benchmark
 benchmark/fts/layered_autocomplete/smoke/incremental_insert.benchmark
 benchmark/fts/layered_autocomplete/smoke/incremental_delete.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_leaf.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_flat.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_nested.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_min_should_match.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_must_not.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_match.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_wide.benchmark
-benchmark/fts/layered_autocomplete/smoke/boolean_deep.benchmark

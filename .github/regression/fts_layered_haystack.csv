@@ -8,9 +8,3 @@ benchmark/fts/layered_autocomplete/haystack/layered_match.benchmark
 benchmark/fts/layered_autocomplete/haystack/base_match.benchmark
 benchmark/fts/layered_autocomplete/haystack/incremental_insert.benchmark
 benchmark/fts/layered_autocomplete/haystack/incremental_delete.benchmark
-benchmark/fts/layered_autocomplete/haystack/boolean_leaf.benchmark
-benchmark/fts/layered_autocomplete/haystack/boolean_flat.benchmark
-benchmark/fts/layered_autocomplete/haystack/boolean_nested.benchmark
-benchmark/fts/layered_autocomplete/haystack/boolean_min_should_match.benchmark
-benchmark/fts/layered_autocomplete/haystack/boolean_must_not.benchmark
-benchmark/fts/layered_autocomplete/haystack/boolean_match.benchmark
