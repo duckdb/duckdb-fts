@@ -52,3 +52,47 @@ query II
 SELECT fieldid, field FROM fts_main_single_quote_col.fields
 ----
 0	bo'dy
+
+# Custom stopword relations are parsed as qualified names and quoted by the
+# template renderer.
+statement ok
+CREATE SCHEMA "stop words"
+
+statement ok
+CREATE TABLE "stop words"."terms""list"(sw VARCHAR)
+
+statement ok
+INSERT INTO "stop words"."terms""list" VALUES ('noise')
+
+statement ok
+CREATE TABLE custom_stopword_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO custom_stopword_docs VALUES ('doc1', 'noise signal noise')
+
+statement ok
+PRAGMA create_fts_index('custom_stopword_docs', 'id', 'body', stemmer='none', stopwords='"stop words"."terms""list"')
+
+query T
+SELECT term FROM fts_main_custom_stopword_docs.dict ORDER BY term
+----
+signal
+
+# Regex text is quoted as a string literal before it enters the SQL template.
+# Quotes, dollar markers, and template-like text must remain ordinary regex
+# content rather than affecting C++ or template parsing.
+statement ok
+CREATE TABLE template_ignore_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO template_ignore_docs VALUES ('doc1', 'alpha''$$ {{fts_schema}}beta')
+
+statement ok
+PRAGMA create_fts_index('template_ignore_docs', 'id', 'body', stemmer='none', stopwords='none', ignore='[''${}]+')
+
+query T rowsort
+SELECT term FROM fts_main_template_ignore_docs.dict
+----
+alpha
+beta
+fts_schema
