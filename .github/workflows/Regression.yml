@@ -58,6 +58,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes ccache ninja-build
 
+      - uses: ./duckdb/.github/actions/ccache-action
+        with:
+          key: fts-regression-runners
+
       - name: Build current benchmark runner
         env:
           BUILD_BENCHMARK: 1
