@@ -192,17 +192,14 @@ jobs:
               --nofail \
               --verbose 2>&1 | tee field-scoring-smoke.log
 
-            # Move this list to the base-versus-current invocation after the
-            # structured-query macros are available on the merge base.
             python3 duckdb/scripts/regression/test_runner.py \
-              --old "$NEW_RUNNER" \
+              --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$BOOLEAN_BENCHMARKS" \
               --root-dir . \
               --threads 2 \
               --clear-benchmark-cache \
-              --nofail \
-              --verbose 2>&1 | tee boolean-smoke.log
+              --verbose 2>&1 | tee boolean-regression.log
           }
 
           export -f run_benchmarks
@@ -225,9 +222,9 @@ jobs:
             echo '```text'
             test ! -f field-scoring-smoke.log || cat field-scoring-smoke.log
             echo '```'
-            echo '## FTS Boolean-query smoke'
+            echo '## FTS Boolean-query regression'
             echo '```text'
-            test ! -f boolean-smoke.log || cat boolean-smoke.log
+            test ! -f boolean-regression.log || cat boolean-regression.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -240,5 +237,5 @@ jobs:
             layered-regression.log
             autocomplete-smoke.log
             field-scoring-smoke.log
-            boolean-smoke.log
+            boolean-regression.log
           if-no-files-found: ignore
