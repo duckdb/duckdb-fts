@@ -495,7 +495,7 @@ FROM fts_main_pattern_docs.search_layered_bm25_query(
     '{"query":"data*","query_mode":"unsupported"}'::JSON
 )
 ----
-query_mode must be one of standard, autocomplete, phrase, phrase_prefix, near, wildcard, or regex
+query_mode must be one of standard, exact, prefix, autocomplete, phrase, phrase_prefix, near, wildcard, or regex
 
 statement error
 FROM fts_main_pattern_docs.search_layered_bm25_query(

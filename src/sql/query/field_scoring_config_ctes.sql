@@ -9,11 +9,11 @@ requested_fields AS (
 field_config AS (
     SELECT fts_fields.fieldid,
            coalesce(
-               map_extract_value(params.field_weights, fts_fields.field),
+               list_filter(map_entries(params.field_weights), lambda e: lower(e.key) = lower(fts_fields.field))[1].value,
                1.0
            )::DOUBLE AS field_weight,
            coalesce(
-               map_extract_value(params.field_b, fts_fields.field),
+               list_filter(map_entries(params.field_b), lambda e: lower(e.key) = lower(fts_fields.field))[1].value,
                params.default_b
            )::DOUBLE AS field_b,
            list_extract(
@@ -23,8 +23,8 @@ field_config AS (
     FROM {{fts_schema}}.fields AS fts_fields
     CROSS JOIN params
     CROSS JOIN {{fts_schema}}.stats AS stats
-    WHERE CASE WHEN fields IS NULL THEN true ELSE fts_fields.field IN (
-        SELECT requested_fields.field
+    WHERE CASE WHEN fields IS NULL THEN true ELSE lower(fts_fields.field) IN (
+        SELECT lower(requested_fields.field)
         FROM requested_fields
     ) END
 ),

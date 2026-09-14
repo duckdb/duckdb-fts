@@ -230,9 +230,9 @@ raw_query_validation_errors AS (
     SELECT 'fields contains unknown field: ' || field_name AS message
     FROM field_entries
     WHERE field_type = 'VARCHAR'
-      AND field_name NOT IN (SELECT field FROM {{fts_schema}}.fields)
+      AND lower(field_name) NOT IN (SELECT lower(field) FROM {{fts_schema}}.fields)
     UNION ALL
-    SELECT 'query_mode must be one of standard, autocomplete, phrase, phrase_prefix, near, wildcard, or regex' AS message
+    SELECT 'query_mode must be one of standard, exact, prefix, autocomplete, phrase, phrase_prefix, near, wildcard, or regex' AS message
     FROM query_nodes
     WHERE has_query
       AND list_contains(json_keys(node_json), 'query_mode')
@@ -240,6 +240,8 @@ raw_query_validation_errors AS (
           json_type(json_extract(node_json, '$.query_mode')) <> 'VARCHAR'
           OR lower(json_extract_string(node_json, '$.query_mode')) NOT IN (
               'standard',
+              'exact',
+              'prefix',
               'autocomplete',
               'phrase',
               'phrase_prefix',
@@ -449,7 +451,7 @@ structured_pattern_fields AS (
     SELECT leaves.node_id,
            fts_fields.fieldid,
            coalesce(
-               map_extract_value(query_params.scoring_weights, fts_fields.field),
+               list_filter(map_entries(query_params.scoring_weights), lambda e: lower(e.key) = lower(fts_fields.field))[1].value,
                1.0
            )::DOUBLE AS field_weight
     FROM pattern_leaves AS leaves
@@ -464,7 +466,7 @@ structured_pattern_fields AS (
            SELECT 1
            FROM field_entries
            WHERE field_entries.node_id = leaves.node_id
-             AND field_entries.field_name = fts_fields.field
+             AND lower(field_entries.field_name) = lower(fts_fields.field)
        )
 ),
 structured_pattern_field_matches AS (

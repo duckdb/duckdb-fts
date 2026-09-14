@@ -40,10 +40,15 @@ raw_field_scoring_validation_errors AS (
        OR NOT isfinite(value)
        OR value < 0.0
     UNION ALL
+    SELECT 55 AS priority,
+           'field_weights contains fields that differ only by case' AS message
+    FROM (SELECT count(*) AS n, count(DISTINCT lower(key)) AS d FROM weight_entries) AS weight_keys
+    WHERE weight_keys.n <> weight_keys.d
+    UNION ALL
     SELECT 60 AS priority,
            'field_weights contains unknown field: ' || key AS message
     FROM weight_entries
-    WHERE key NOT IN (SELECT field FROM {{fts_schema}}.fields)
+    WHERE lower(key) NOT IN (SELECT lower(field) FROM {{fts_schema}}.fields)
     UNION ALL
     SELECT 70 AS priority,
            'field b for ' || key || ' must be finite and between 0 and 1' AS message
@@ -52,10 +57,15 @@ raw_field_scoring_validation_errors AS (
        OR NOT isfinite(value)
        OR value NOT BETWEEN 0.0 AND 1.0
     UNION ALL
+    SELECT 75 AS priority,
+           'field_b contains fields that differ only by case' AS message
+    FROM (SELECT count(*) AS n, count(DISTINCT lower(key)) AS d FROM field_b_entries) AS b_keys
+    WHERE b_keys.n <> b_keys.d
+    UNION ALL
     SELECT 80 AS priority,
            'field_b contains unknown field: ' || key AS message
     FROM field_b_entries
-    WHERE key NOT IN (SELECT field FROM {{fts_schema}}.fields){{requested_fields_validation}}
+    WHERE lower(key) NOT IN (SELECT lower(field) FROM {{fts_schema}}.fields){{requested_fields_validation}}
 ),
 validation_errors AS (
     SELECT message

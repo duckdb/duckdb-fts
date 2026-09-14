@@ -16,7 +16,9 @@ WITH params(term_limit, max_df_ratio, max_df, enable_prefix, enable_substring, e
                WHEN 'near' THEN 'near'
                WHEN 'wildcard' THEN 'wildcard'
                WHEN 'regex' THEN 'regex'
-               ELSE error('query_mode must be one of standard, autocomplete, phrase, phrase_prefix, near, wildcard, or regex')
+               WHEN 'exact' THEN 'exact'
+               WHEN 'prefix' THEN 'prefix'
+               ELSE error('query_mode must be one of standard, exact, prefix, autocomplete, phrase, phrase_prefix, near, wildcard, or regex')
            END,
            try_cast(near_distance AS BIGINT),
            field_weights::MAP(VARCHAR, DOUBLE),
@@ -30,10 +32,12 @@ search_validation_errors AS (
     SELECT message
     FROM (
         SELECT 10 AS priority,
-               'query_mode must be one of standard, autocomplete, phrase, phrase_prefix, near, wildcard, or regex' AS message
+               'query_mode must be one of standard, exact, prefix, autocomplete, phrase, phrase_prefix, near, wildcard, or regex' AS message
         WHERE query_mode IS NULL
            OR lower(query_mode::VARCHAR) NOT IN (
                'standard',
+               'exact',
+               'prefix',
                'autocomplete',
                'phrase',
                'phrase_prefix',
@@ -97,10 +101,10 @@ query_shape AS (
            CASE
                WHEN params.query_mode = 'phrase'
                 AND count(*) = 1
-                   THEN 'standard'
+                   THEN 'exact'
                WHEN params.query_mode = 'phrase_prefix'
                 AND count(*) = 1
-                   THEN 'autocomplete'
+                   THEN 'prefix'
                WHEN params.query_mode = 'near'
                 AND count(DISTINCT term) = 1
                    THEN 'standard'
@@ -109,6 +113,13 @@ query_shape AS (
     FROM query_analyzer_tokens
     CROSS JOIN params
     GROUP BY params.query_mode
+),
+leaf_shape_errors AS (
+    SELECT 'query_mode ' || params.query_mode || ' requires exactly one query token' AS message
+    FROM query_shape
+    CROSS JOIN params
+    WHERE params.query_mode IN ('exact', 'prefix')
+      AND query_shape.token_count <> 1
 ),
 autocomplete_final_token AS (
     SELECT raw_token AS query_term,
@@ -127,7 +138,7 @@ stemmed_tokens AS (
         SELECT term AS query_term
         FROM query_analyzer_tokens
         CROSS JOIN query_shape
-        WHERE query_shape.effective_mode = 'standard'
+        WHERE query_shape.effective_mode IN ('standard', 'exact')
            OR (
                query_shape.effective_mode = 'autocomplete'
                AND token_position < query_shape.final_position
@@ -383,6 +394,47 @@ autocomplete_prefix_terms AS (
            ) AS expansion_rank
     FROM autocomplete_candidates
     WHERE term <> query_term
+),
+prefix_input AS (
+    SELECT raw_token AS query_term,
+           length(raw_token)::BIGINT AS query_len,
+           least(length(raw_token), 3)::UTINYINT AS prefix_len,
+           substr(raw_token, 1, least(length(raw_token), 3)) AS prefix
+    FROM query_analyzer_tokens
+    CROSS JOIN query_shape
+    WHERE query_shape.effective_mode = 'prefix'
+),
+prefix_candidates AS (
+    -- No DF cap or term_limit, unlike autocomplete. Length two or more uses the
+    -- prefix sidecar; length one has no sidecar entry (2- and 3-char prefixes only)
+    -- and scans raw_dict.
+    SELECT prefix_input.query_term,
+           raw_dict.termid,
+           raw_dict.rawtermid,
+           raw_dict.raw_term AS term,
+           raw_dict.df,
+           1.0::DOUBLE AS expansion_weight,
+           'prefix' AS match_type
+    FROM prefix_input
+    JOIN {{fts_schema}}.term_prefixes AS term_prefixes
+      ON term_prefixes.prefix_len = prefix_input.prefix_len
+     AND term_prefixes.prefix = prefix_input.prefix
+    JOIN {{fts_schema}}.raw_dict AS raw_dict
+      ON raw_dict.rawtermid = term_prefixes.rawtermid
+    WHERE prefix_input.query_len >= 2
+      AND starts_with(raw_dict.raw_term, prefix_input.query_term)
+    UNION ALL
+    SELECT prefix_input.query_term,
+           raw_dict.termid,
+           raw_dict.rawtermid,
+           raw_dict.raw_term AS term,
+           raw_dict.df,
+           1.0::DOUBLE AS expansion_weight,
+           'prefix' AS match_type
+    FROM prefix_input
+    JOIN {{fts_schema}}.raw_dict AS raw_dict
+      ON starts_with(raw_dict.raw_term, prefix_input.query_term)
+    WHERE prefix_input.query_len = 1
 ),
 phrase_tokens AS (
     SELECT raw_token,
@@ -675,6 +727,9 @@ selected_terms AS (
         FROM autocomplete_prefix_terms
         CROSS JOIN params
         WHERE expansion_rank <= params.term_limit
+        UNION ALL
+        SELECT *
+        FROM prefix_candidates
     ) AS terms
     GROUP BY query_term,
              termid,
@@ -742,5 +797,11 @@ SELECT CASE WHEN error(message) THEN NULL::VARCHAR END AS docname,
        CASE WHEN error(message) THEN NULL::DOUBLE END AS score,
        CASE WHEN error(message) THEN NULL::BIGINT END AS rank
 FROM search_validation_errors
+WHERE error(message)
+UNION ALL
+SELECT CASE WHEN error(message) THEN NULL::VARCHAR END AS docname,
+       CASE WHEN error(message) THEN NULL::DOUBLE END AS score,
+       CASE WHEN error(message) THEN NULL::BIGINT END AS rank
+FROM leaf_shape_errors
 WHERE error(message)
 ORDER BY rank;

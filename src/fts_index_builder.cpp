@@ -259,7 +259,7 @@ FieldScoringValidationCTEs(const QualifiedName &qname,
             "    SELECT 15 AS priority,\n"
             "           'fields contains unknown field: ' || field AS message\n"
             "    FROM requested_fields\n"
-            "    WHERE field NOT IN (SELECT field FROM " +
+            "    WHERE lower(field) NOT IN (SELECT lower(field) FROM " +
                 GetFTSSchema(qname) + ".fields)"
           : "";
   return RenderSQLTemplate(
