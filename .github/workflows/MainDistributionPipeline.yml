@@ -18,9 +18,9 @@ jobs:
     name: Get DuckDB version
     runs-on: ubuntu-latest
     outputs:
-      duckdb_version: ${{ steps.version.outputs.duckdb_version }}
+      duckdb_version: v1.5.6 steps.version.outputs.duckdb_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v1.5.6
         with:
           sparse-checkout: .github
       - id: version
@@ -29,10 +29,10 @@ jobs:
   duckdb-stable-build:
     name: Build extension binaries
     needs: get-duckdb-version
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.6
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
-      ci_tools_version: main
+      duckdb_version: v1.5.6 needs.get-duckdb-version.outputs.duckdb_version }}
+      ci_tools_version: v1.5.6
       extension_name: fts
 
   fts-regression:
@@ -47,19 +47,19 @@ jobs:
       - get-duckdb-version
       - duckdb-stable-build
       - fts-regression
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5.6
     secrets: inherit
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
-      ci_tools_version: main
+      duckdb_version: v1.5.6 needs.get-duckdb-version.outputs.duckdb_version }}
+      ci_tools_version: v1.5.6
       extension_name: fts
 
   code-quality-check:
     name: Code Quality Check
     needs: get-duckdb-version
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5.6
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
-      ci_tools_version: main
+      duckdb_version: v1.5.6 needs.get-duckdb-version.outputs.duckdb_version }}
+      ci_tools_version: v1.5.6
       extension_name: fts
       format_checks: 'format;tidy'
