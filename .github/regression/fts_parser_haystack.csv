@@ -1,0 +1,4 @@
+benchmark/fts/layered_autocomplete/haystack/parse_terms.benchmark
+benchmark/fts/layered_autocomplete/haystack/parse_boolean.benchmark
+benchmark/fts/layered_autocomplete/haystack/parse_phrase.benchmark
+benchmark/fts/layered_autocomplete/haystack/parse_near.benchmark

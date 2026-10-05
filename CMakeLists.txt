@@ -78,6 +78,7 @@ set(EXTENSION_SOURCES
     ${EXTENSION_BASE_FOLDER}/fts_indexing.cpp
     ${EXTENSION_BASE_FOLDER}/fts_near.cpp
     ${EXTENSION_BASE_FOLDER}/fts_pattern.cpp
+    ${EXTENSION_BASE_FOLDER}/fts_query_parser.cpp
     ${EXTENSION_BASE_FOLDER}/fts_sql_template.cpp
     ${EXTENSION_BASE_FOLDER}/fts_unicode_classifier.cpp
     ${FTS_SQL_ASSETS_SOURCE}

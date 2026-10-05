@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/parse_query.benchmark.in
+display_name=FTS bare-term query parsing (1M)
+rows=1000000
+query_expr='workspace item' || (i % 100)::VARCHAR || ' search benchmark' || (i % 20)::VARCHAR

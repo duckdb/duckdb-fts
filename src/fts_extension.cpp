@@ -13,6 +13,7 @@
 #include "fts_indexing.hpp"
 #include "fts_near.hpp"
 #include "fts_pattern.hpp"
+#include "fts_query_parser.hpp"
 #include "fts_unicode_classifier.hpp"
 #include "libstemmer.h"
 #include "utf8proc_wrapper.hpp"
@@ -236,6 +237,7 @@ static void LoadInternal(ExtensionLoader &loader) {
   loader.RegisterFunction(opensearch_standard_tokenize_func);
   loader.RegisterFunction(GetFTSAnalyzePatternFunction());
   loader.RegisterFunction(GetFTSNearTfFunction());
+  loader.RegisterFunction(GetFTSParseQueryFunction());
   loader.RegisterFunction(create_fts_index_func);
   loader.RegisterFunction(create_fts_boolean_query_macros_func);
   loader.RegisterFunction(drop_fts_index_func);

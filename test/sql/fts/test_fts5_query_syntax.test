@@ -1,0 +1,334 @@
+# name: test/sql/fts/test_fts5_query_syntax.test
+# description: FTS5 query strings compile to the structured queries the layered index executes
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require json
+
+require no_alternative_verify
+
+# Compilation: one assertion per construct, plus the precedence cases.
+query I
+SELECT fts_parse_query('alpha').query_json
+----
+{"query":"alpha"}
+
+query I
+SELECT fts_parse_query('alpha beta').query_json
+----
+{"must":[{"query":"alpha"},{"query":"beta"}]}
+
+query I
+SELECT fts_parse_query('alpha AND beta').query_json
+----
+{"must":[{"query":"alpha"},{"query":"beta"}]}
+
+query I
+SELECT fts_parse_query('alpha OR beta gamma').query_json
+----
+{"should":[{"query":"alpha"},{"must":[{"query":"beta"},{"query":"gamma"}]}]}
+
+query I
+SELECT fts_parse_query('alpha NOT beta gamma').query_json
+----
+{"must":[{"query":"alpha"}],"must_not":[{"must":[{"query":"beta"},{"query":"gamma"}]}]}
+
+query I
+SELECT fts_parse_query('alpha OR beta NOT gamma').query_json
+----
+{"should":[{"query":"alpha"},{"must":[{"query":"beta"}],"must_not":[{"query":"gamma"}]}]}
+
+query I
+SELECT fts_parse_query('(alpha OR beta) NOT gamma').query_json
+----
+{"must":[{"should":[{"query":"alpha"},{"query":"beta"}]}],"must_not":[{"query":"gamma"}]}
+
+query I
+SELECT fts_parse_query('"machine learning"').query_json
+----
+{"query":"machine learning","query_mode":"phrase"}
+
+query I
+SELECT fts_parse_query('"machine learning" + theory').query_json
+----
+{"query":"machine learning theory","query_mode":"phrase"}
+
+query I
+SELECT fts_parse_query('mach*').query_json
+----
+{"query":"mach","query_mode":"autocomplete"}
+
+query I
+SELECT fts_parse_query('"machine lear" + ni*').query_json
+----
+{"query":"machine lear ni","query_mode":"phrase_prefix"}
+
+query I
+SELECT fts_parse_query('body : alpha').query_json
+----
+{"query":"alpha","fields":["body"]}
+
+query I
+SELECT fts_parse_query('{title body} : (alpha OR beta)').query_json
+----
+{"should":[{"query":"alpha","fields":["title","body"]},{"query":"beta","fields":["title","body"]}]}
+
+query I
+SELECT fts_parse_query('NEAR(machine learning, 5)').query_json
+----
+{"query":"machine learning","query_mode":"near","near_distance":5}
+
+query I
+SELECT fts_parse_query('NEAR(machine learning)').query_json
+----
+{"query":"machine learning","query_mode":"near"}
+
+# Lowercase and/or/not are ordinary barewords (FTS5 keywords are capital letters).
+query I
+SELECT fts_parse_query('and or not').query_json
+----
+{"must":[{"query":"and"},{"query":"or"},{"query":"not"}]}
+
+query I
+SELECT fts_parse_query('"a ""quoted"" b"').query_json
+----
+{"query":"a \"quoted\" b","query_mode":"phrase"}
+
+# Inside quotes, * and ^ are literal characters handed to the analyzer.
+query I
+SELECT fts_parse_query('"a*b^c"').query_json
+----
+{"query":"a*b^c","query_mode":"phrase"}
+
+# Bare terms concatenate like single-token phrases.
+query I
+SELECT fts_parse_query('a + b').query_json
+----
+{"query":"a b","query_mode":"phrase"}
+
+query I
+SELECT fts_parse_query('"abc" *').query_json
+----
+{"query":"abc","query_mode":"phrase_prefix"}
+
+# NOT is left-associative.
+query I
+SELECT fts_parse_query('a NOT b NOT c').query_json
+----
+{"must":[{"must":[{"query":"a"}],"must_not":[{"query":"b"}]}],"must_not":[{"query":"c"}]}
+
+# NEAR without a parenthesis is an ordinary term, exactly as in FTS5.
+query I
+SELECT fts_parse_query('NEAR alpha').query_json
+----
+{"must":[{"query":"NEAR"},{"query":"alpha"}]}
+
+# The distance is re-serialized through an integer, so 007 stays valid JSON.
+query I
+SELECT fts_parse_query('NEAR(a b, 007)').query_json
+----
+{"query":"a b","query_mode":"near","near_distance":7}
+
+# Control characters inside quotes come out as JSON escapes.
+query I
+SELECT fts_parse_query('"a' || chr(9) || 'b"').query_json
+----
+{"query":"a\tb","query_mode":"phrase"}
+
+query I
+SELECT fts_parse_query('"a' || chr(1) || 'b"').query_json
+----
+{"query":"a\u0001b","query_mode":"phrase"}
+
+# An empty phrase adds no constraint (FTS5 semantics): it drops out of groups,
+# and a query left with no constraint at all matches nothing.
+query I
+SELECT fts_parse_query('""').query_json
+----
+{"query":"","query_mode":"phrase"}
+
+query I
+SELECT fts_parse_query('"" alpha').query_json
+----
+{"query":"alpha"}
+
+query I
+SELECT fts_parse_query('alpha NOT ""').query_json
+----
+{"query":"alpha"}
+
+query I
+SELECT fts_parse_query('"" NOT alpha').query_json
+----
+{"query":"","query_mode":"phrase"}
+
+query I
+SELECT fts_parse_query('"" + alpha').query_json
+----
+{"query":"alpha","query_mode":"phrase"}
+
+# Rejection: every unsupported or malformed construct names itself.
+query I
+SELECT fts_parse_query('one (two OR three)').error_message
+----
+fts5 query requires an operator next to a parenthesised group
+
+query I
+SELECT fts_parse_query('NEAR("a b" c, 3)').error_message
+----
+fts5 phrases inside NEAR are not supported
+
+query I
+SELECT fts_parse_query('^alpha').error_message
+----
+fts5 initial-token anchors are not supported
+
+query I
+SELECT fts_parse_query('-title : alpha').error_message
+----
+fts5 column complements are not supported
+
+query I
+SELECT fts_parse_query('NEAR(alpha, 3)').error_message
+----
+fts5 NEAR requires two or more terms
+
+query I
+SELECT fts_parse_query('alpha AND').error_message
+----
+fts5 query has a dangling operator
+
+query I
+SELECT fts_parse_query('(alpha').error_message
+----
+fts5 query contains an unclosed parenthesis
+
+query I
+SELECT fts_parse_query('"alpha').error_message
+----
+fts5 query contains an unclosed string
+
+query I
+SELECT fts_parse_query('NEAR(alpha beta, x)').error_message
+----
+fts5 NEAR distance must be a non-negative integer
+
+query I
+SELECT fts_parse_query('   ').error_message
+----
+fts5 query is empty
+
+query I
+SELECT fts_parse_query('!@#').error_message
+----
+fts5 query contains a character that requires quoting
+
+query I
+SELECT fts_parse_query('title : (body : alpha)').error_message
+----
+fts5 column filters select no common column
+
+query I
+SELECT fts_parse_query('{title').error_message
+----
+fts5 column list is invalid
+
+query I
+SELECT fts_parse_query('{title body} alpha').error_message
+----
+fts5 column list must be followed by a colon
+
+# Lowercase near is a bareword, which makes the parenthesis the error.
+query I
+SELECT fts_parse_query('near(alpha beta, 3)').error_message
+----
+fts5 query requires an operator next to a parenthesised group
+
+query I
+SELECT fts_parse_query('NEAR(a b, 99999999999999999999)').error_message
+----
+fts5 NEAR distance is out of range
+
+# Nesting is bounded like FTS5's own parser (it names a maximum depth of 256).
+query I
+SELECT fts_parse_query(repeat('(', 300) || 'alpha' || repeat(')', 300)).error_message
+----
+fts5 query is nested too deeply
+
+query I
+SELECT fts_parse_query(repeat('alpha NOT ', 300) || 'alpha').error_message
+----
+fts5 query is nested too deeply
+
+query I
+SELECT fts_parse_query(NULL).error_message
+----
+fts5 query must not be NULL
+
+# The two struct members are complementary.
+query II
+SELECT fts_parse_query('alpha').error_message IS NULL, fts_parse_query('(alpha').query_json IS NULL
+----
+true	true
+
+# Equivalence: parse, execute, and match the hand-written structured query.
+statement ok
+CREATE TABLE fts5_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO fts5_docs VALUES
+    ('py_ml',    'python guide',  'python and machine learning basics'),
+    ('py_only',  'python intro',  'python scripting deprecated tricks'),
+    ('java_doc', 'java handbook', 'java patterns explained'),
+    ('duck_t',   'duck title',    'no water here'),
+    ('duck_b',   'plain title',   'a duck in the body')
+
+statement ok
+PRAGMA create_fts_index('fts5_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', layered_search=true)
+
+query I
+SELECT (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25_query(fts_parse_query('python AND "machine learning"').query_json::JSON)
+) = (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25_query('{"must":[{"query":"python"},{"query":"machine learning","query_mode":"phrase"}]}')
+)
+----
+true
+
+query I
+SELECT (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25_query(fts_parse_query('python OR java NOT deprecated').query_json::JSON)
+) = (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25_query('{"should":[{"query":"python"},{"must":[{"query":"java"}],"must_not":[{"query":"deprecated"}]}]}')
+)
+----
+true
+
+query I
+SELECT (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25_query(fts_parse_query('NEAR(machine learning, 5)').query_json::JSON)
+) = (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25('machine learning', query_mode := 'near', near_distance := 5)
+)
+----
+true
+
+query I
+SELECT (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25_query(fts_parse_query('title : duck').query_json::JSON)
+) = (
+    SELECT list(docname ORDER BY docname)
+    FROM fts_main_fts5_docs.search_layered_bm25('duck', fields := 'title')
+)
+----
+true

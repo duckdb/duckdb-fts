@@ -145,6 +145,7 @@ jobs:
               echo "ANALYZER_BENCHMARKS=.github/regression/fts_analyzer_haystack.csv"
               echo "PATTERN_BENCHMARKS=.github/regression/fts_pattern_haystack.csv"
               echo "NEAR_BENCHMARKS=.github/regression/fts_near_haystack.csv"
+              echo "PARSER_BENCHMARKS=.github/regression/fts_parser_haystack.csv"
               echo "FOOTPRINT_ROWS=1000000"
               echo "BENCHMARK_BUDGET_SECONDS=3600"
             } >> "$GITHUB_ENV"
@@ -158,6 +159,7 @@ jobs:
               echo "ANALYZER_BENCHMARKS=.github/regression/fts_analyzer.csv"
               echo "PATTERN_BENCHMARKS=.github/regression/fts_pattern.csv"
               echo "NEAR_BENCHMARKS=.github/regression/fts_near.csv"
+              echo "PARSER_BENCHMARKS=.github/regression/fts_parser.csv"
               echo "FOOTPRINT_ROWS=50000"
               echo "BENCHMARK_BUDGET_SECONDS=600"
             } >> "$GITHUB_ENV"
@@ -248,10 +250,20 @@ jobs:
               --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee near-smoke.log
+
+            python3 duckdb/scripts/regression/test_runner.py \
+              --old "$NEW_RUNNER" \
+              --new "$NEW_RUNNER" \
+              --benchmarks "$PARSER_BENCHMARKS" \
+              --root-dir . \
+              --threads 2 \
+              --clear-benchmark-cache \
+              --nofail \
+              --verbose 2>&1 | tee parser-smoke.log
           }
 
           export -f run_benchmarks
-          export OLD_RUNNER NEW_RUNNER LAYERED_BENCHMARKS AUTOCOMPLETE_BENCHMARKS FIELD_SCORING_BENCHMARKS BOOLEAN_BENCHMARKS PHRASE_BENCHMARKS ANALYZER_BENCHMARKS PATTERN_BENCHMARKS NEAR_BENCHMARKS
+          export OLD_RUNNER NEW_RUNNER LAYERED_BENCHMARKS AUTOCOMPLETE_BENCHMARKS FIELD_SCORING_BENCHMARKS BOOLEAN_BENCHMARKS PHRASE_BENCHMARKS ANALYZER_BENCHMARKS PATTERN_BENCHMARKS NEAR_BENCHMARKS PARSER_BENCHMARKS
           timeout "${BENCHMARK_BUDGET_SECONDS}s" bash -c run_benchmarks
 
       - name: Report positional index footprint
@@ -299,6 +311,10 @@ jobs:
             echo '```text'
             test ! -f near-smoke.log || cat near-smoke.log
             echo '```'
+            echo '## FTS query parser smoke'
+            echo '```text'
+            test ! -f parser-smoke.log || cat parser-smoke.log
+            echo '```'
             echo '## FTS positional index footprint'
             echo '```text'
             test ! -f phrase-footprint.log || cat phrase-footprint.log
@@ -319,5 +335,6 @@ jobs:
             analyzer-smoke.log
             pattern-smoke.log
             near-smoke.log
+            parser-smoke.log
             phrase-footprint.log
           if-no-files-found: ignore

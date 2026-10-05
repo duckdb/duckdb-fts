@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/parse_query.benchmark.in
+display_name=FTS Boolean query parsing (50K)
+rows=50000
+query_expr='(alpha' || (i % 50)::VARCHAR || ' OR beta' || (i % 20)::VARCHAR || ') NOT gamma' || (i % 10)::VARCHAR

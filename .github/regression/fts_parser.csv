@@ -1,0 +1,4 @@
+benchmark/fts/layered_autocomplete/smoke/parse_terms.benchmark
+benchmark/fts/layered_autocomplete/smoke/parse_boolean.benchmark
+benchmark/fts/layered_autocomplete/smoke/parse_phrase.benchmark
+benchmark/fts/layered_autocomplete/smoke/parse_near.benchmark

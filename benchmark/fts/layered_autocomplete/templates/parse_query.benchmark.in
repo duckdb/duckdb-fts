@@ -1,0 +1,26 @@
+name ${display_name}
+group fts
+subgroup parser
+
+require fts
+
+init
+CREATE TABLE queries(q VARCHAR NOT NULL);
+INSERT INTO queries
+SELECT ${query_expr}
+FROM range(${rows}) AS source(i);
+
+load
+SELECT count((fts_parse_query(q)).query_json) FROM queries;
+
+assert II
+SELECT count(*) = ${rows},
+       count(p.error_message) = 0
+FROM (SELECT fts_parse_query(q) AS p FROM queries) AS parsed
+----
+true	true
+
+run
+SELECT count(p.query_json),
+       sum(length(p.query_json))
+FROM (SELECT fts_parse_query(q) AS p FROM queries) AS parsed;

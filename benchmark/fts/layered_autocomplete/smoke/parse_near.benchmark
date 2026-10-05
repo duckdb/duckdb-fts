@@ -1,0 +1,4 @@
+template benchmark/fts/layered_autocomplete/templates/parse_query.benchmark.in
+display_name=FTS near query parsing (50K)
+rows=50000
+query_expr='NEAR(workspace item' || (i % 100)::VARCHAR || ' search' || (i % 20)::VARCHAR || ', ' || (i % 30)::VARCHAR || ')'

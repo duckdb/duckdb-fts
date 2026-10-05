@@ -377,6 +377,38 @@ out-of-range `minimum_should_match` values are rejected. Setting
 `minimum_should_match` explicitly to zero on a should-only group matches all
 indexed documents; documents that match no optional leaf receive score `0`.
 
+### `fts_parse_query` Function
+
+```python
+fts_parse_query(query_string)
+```
+
+Compiles an SQLite FTS5 query string into the JSON tree that
+`search_layered_bm25_query` and `match_layered_bm25_query` execute. The result
+is a struct with `query_json` and `error_message`; exactly one of them is
+`NULL`. Supported FTS5 syntax: implicit and explicit `AND`, `OR`, binary
+`NOT`, parentheses, `"quoted phrases"` with `""` escaping and `+`
+concatenation, trailing `*` prefixes, `col :` and `{col1 col2} :` column
+filters, and `NEAR(term1 term2 ..., N)`. Keywords are recognized in capital
+letters only, exactly as in FTS5.
+
+```sql
+SELECT fts_parse_query('author : han OR "quacking quac" *').query_json;
+-- {"should":[{"query":"han","fields":["author"]},{"query":"quacking quac","query_mode":"phrase_prefix"}]}
+
+SELECT docname, score, rank
+FROM fts_main_animal_sounds.search_layered_bm25_query(
+    fts_parse_query('quack NOT archive').query_json::JSON,
+    top_k := 10
+);
+```
+
+The parser is a pure function: field names are checked by the structured
+macros at query time, `NEAR` distances map to `near_distance` one to one, and
+nesting is bounded at depth 256 like FTS5's own parser. Initial-token anchors
+(`^`), column complements (`-col :`), and phrases inside `NEAR` are not
+supported and are rejected with named errors.
+
 ### `stem` Function
 
 ```python
@@ -607,6 +639,17 @@ FROM fts_main_animal_sounds.search_layered_bm25(
     'quacking quac',
     fields := 'text_content',
     query_mode := 'phrase_prefix',
+    top_k := 10
+);
+```
+
+The same searches can be written as FTS5 query strings and compiled with
+`fts_parse_query`:
+
+```sql
+SELECT docname, score, rank
+FROM fts_main_animal_sounds.search_layered_bm25_query(
+    fts_parse_query('"quacking quac" * OR author : mark').query_json::JSON,
     top_k := 10
 );
 ```
