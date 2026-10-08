@@ -186,7 +186,7 @@ filtering, and BM25 parameters as the base FTS index.
 | `enable_fuzzy` | `BOOLEAN` | Whether to include Damerau-Levenshtein fuzzy alternatives. Defaults to `true` |
 | `enable_short_fuzzy` | `BOOLEAN` | Whether to use a length-clustered path for short fuzzy alternatives. Defaults to `true` |
 | `expand_exact_terms` | `BOOLEAN` | Whether to also expand a query term that already has an exact dictionary match. Defaults to `false` |
-| `query_mode` | `VARCHAR` | Query execution mode. `standard` uses exact, prefix, substring, and fuzzy dictionary expansion; `autocomplete` keeps preceding tokens exact and matches the final token by raw-token prefix; `phrase` requires exact order and adjacency; `phrase_prefix` treats the final phrase token as a raw-token prefix; `near` requires every term in one field within `near_distance` tokens of each other, in any order; `wildcard` matches `*` and `?` patterns; `regex` matches a conservative flat RE2 subset. Defaults to `standard` |
+| `query_mode` | `VARCHAR` | Query execution mode. `standard` uses exact, prefix, substring, and fuzzy dictionary expansion; `exact` matches only the analyzed query term with no expansion; `prefix` matches every token for which the analyzed query term is a prefix, of any length, with no document-frequency or expansion limit; `autocomplete` keeps preceding tokens exact and matches the final token by raw-token prefix; `phrase` requires exact order and adjacency; `phrase_prefix` treats the final phrase token as a raw-token prefix; `near` requires every term in one field within `near_distance` tokens of each other, in any order; `wildcard` matches `*` and `?` patterns; `regex` matches a conservative flat RE2 subset. Defaults to `standard` |
 | `field_weights` | `MAP(VARCHAR, DOUBLE)` | Non-negative finite weights for indexed fields. Omitted fields have weight `1.0`. Defaults to `NULL` |
 | `field_b` | `MAP(VARCHAR, DOUBLE)` | Per-field BM25 length-normalization parameters. Values must be between `0.0` and `1.0`; omitted fields inherit `b`. Defaults to `NULL` |
 | `scoring_model` | `VARCHAR` | Field scoring model: `bm25f` or `best_fields`. Defaults to `bm25f` |
@@ -210,6 +210,18 @@ IDF remains corpus-wide for both models. Unknown fields and invalid models,
 weights, normalization values, or tie breakers produce an error. A nonzero tie
 breaker is only valid with `best_fields`.
 
+Exact mode returns only documents whose analyzed terms include the analyzed
+query term, with no prefix, substring, or fuzzy expansion; it is the exact-match
+leaf used for SQLite FTS5 bare terms and single quoted terms. Prefix mode returns
+every token for which the analyzed query term is a prefix, of any length including
+a single character, with no document-frequency cap or expansion limit, matching
+FTS5 token prefixes. Prefixes of two or more characters use the prefix sidecar; a
+single character scans the raw-term dictionary, since the sidecar stores only two-
+and three-character prefixes. Both modes require exactly one query token and raise
+an error otherwise. Field names in `fields`, `field_weights`, and `field_b` are
+matched case-insensitively; supplying the same field twice under different casing
+in a weight or normalization map is an error.
+
 Autocomplete mode requires a final searchable token of at least two characters.
 It routes that token through a compact two/three-character prefix table and
 then verifies the full raw-token prefix. The existing postings table stores a
@@ -223,8 +235,9 @@ and before stopword removal, so removed stopwords retain their positional gap.
 Phrase-prefix mode applies the same positional check but expands only the final
 unfinished raw token through the prefix sidecar. `term_limit` bounds those
 deterministically ordered completions; document-frequency filters and fuzzy or
-substring expansion are not applied. A one-token phrase uses standard mode,
-while a one-token phrase-prefix uses autocomplete mode.
+substring expansion are not applied. A one-token phrase uses `exact` mode and a
+one-token phrase-prefix uses `prefix` mode, so a single quoted term or trailing
+prefix matches exactly as SQLite FTS5 does rather than through standard expansion.
 
 Near mode uses the same positional postings to require that every query term
 occurs in one indexed field, in any order, with at most `near_distance` tokens

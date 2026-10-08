@@ -1,0 +1,196 @@
+# name: test/sql/fts/test_fts5_leaf_semantics.test
+# description: FTS5-exact leaf semantics driven through hand-written query_json, parser out of the loop
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require json
+
+require no_alternative_verify
+
+statement ok
+SELECT json_valid('{}')
+
+# kryonix's four-document corpus from the #58 review, verbatim. stemmer='none'
+# and stopwords='none' pair with FTS5's unicode61 tokenizer, which has neither.
+statement ok
+CREATE TABLE fts5_docs(id VARCHAR NOT NULL, x VARCHAR)
+
+statement ok
+INSERT INTO fts5_docs VALUES ('d1', 'gamma'), ('d2', 'alpha'), ('d3', 'alpine'), ('d4', 'beta')
+
+statement ok
+PRAGMA create_fts_index('fts5_docs', 'id', 'x', stemmer='none', stopwords='none', ignore='(\\.|[^a-z0-9])+', layered_search=true)
+
+# SQLite FTS5: MATCH 'gama' returns no rows. standard mode expands the miss.
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"gama"}'::JSON)
+----
+d1
+
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"gama","query_mode":"exact"}'::JSON)
+----
+
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"gamma","query_mode":"exact"}'::JSON)
+----
+d1
+
+# SQLite FTS5: MATCH 'a*' returns alpha and alpine. autocomplete needs two characters.
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"a","query_mode":"autocomplete"}'::JSON)
+----
+
+query I rowsort
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"a","query_mode":"prefix"}'::JSON)
+----
+d2
+d3
+
+query I rowsort
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"al","query_mode":"prefix"}'::JSON)
+----
+d2
+d3
+
+# Field identity is ASCII case-insensitive, as in FTS5. The indexed column is x.
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"alpha","fields":["X"]}'::JSON)
+----
+d2
+
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25('alpha', fields := 'X')
+----
+d2
+
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25('alpha', field_weights := MAP {'X': 2.0})
+----
+d2
+
+statement error
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25('alpha', field_weights := MAP {'X': 1.0, 'x': 2.0})
+----
+field_weights contains fields that differ only by case
+
+# An FTS5 leaf is one token; several tokens are several leaves.
+statement error
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"alpha beta","query_mode":"exact"}'::JSON)
+----
+requires exactly one query token
+
+statement error
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"al be","query_mode":"prefix"}'::JSON)
+----
+requires exactly one query token
+
+# Item 3 (intentional FTS5-compatibility change, #58): a single-token phrase is
+# exact and a single-token phrase-prefix is a prefix, instead of the old standard
+# and autocomplete fallbacks. A single-token near stays standard - lnkuiper's #56
+# D1 fix - because FTS5 has no single-term NEAR.
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"gama","query_mode":"phrase"}'::JSON)
+----
+
+query I rowsort
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"a","query_mode":"phrase_prefix"}'::JSON)
+----
+d2
+d3
+
+query I
+SELECT docname FROM fts_main_fts5_docs.search_layered_bm25_query('{"query":"gamma","query_mode":"phrase"}'::JSON)
+----
+d1
+
+# The new leaves are first-class: they respect field filters and compose inside
+# boolean must/should/must_not, exactly where any other leaf may appear.
+statement ok
+CREATE TABLE compose_docs(id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO compose_docs VALUES ('d1', 'alpha', 'zzz'), ('d2', 'zzz', 'alpine'), ('d3', 'alpha', 'alpine')
+
+statement ok
+PRAGMA create_fts_index('compose_docs', 'id', 'title', 'body', stemmer='none', stopwords='none', ignore='(\\.|[^a-z0-9])+', layered_search=true)
+
+query I
+SELECT docname FROM fts_main_compose_docs.search_layered_bm25_query('{"query":"al","query_mode":"prefix","fields":["title"]}'::JSON) ORDER BY docname
+----
+d1
+d3
+
+query I
+SELECT docname FROM fts_main_compose_docs.search_layered_bm25_query('{"query":"al","query_mode":"prefix","fields":["body"]}'::JSON) ORDER BY docname
+----
+d2
+d3
+
+query I
+SELECT docname FROM fts_main_compose_docs.search_layered_bm25_query('{"must":[{"query":"alpha","query_mode":"exact"},{"query":"alpine","query_mode":"exact"}]}'::JSON) ORDER BY docname
+----
+d3
+
+query I
+SELECT docname FROM fts_main_compose_docs.search_layered_bm25_query('{"should":[{"query":"al","query_mode":"prefix"},{"query":"zzz","query_mode":"exact"}]}'::JSON) ORDER BY docname
+----
+d1
+d2
+d3
+
+query I
+SELECT docname FROM fts_main_compose_docs.search_layered_bm25_query('{"must":[{"query":"alpine","query_mode":"exact"}],"must_not":[{"query":"alpha","query_mode":"exact"}]}'::JSON) ORDER BY docname
+----
+d2
+
+# A prefix with more matches than term_limit: FTS5 returns every one of them.
+statement ok
+CREATE TABLE many_docs(id VARCHAR NOT NULL, x VARCHAR)
+
+statement ok
+INSERT INTO many_docs SELECT 'm' || i, 'zeta' || lpad(i::VARCHAR, 2, '0') FROM range(40) AS t(i)
+
+statement ok
+PRAGMA create_fts_index('many_docs', 'id', 'x', stemmer='none', stopwords='none', ignore='(\\.|[^a-z0-9])+', layered_search=true)
+
+query I
+SELECT count(*) FROM fts_main_many_docs.search_layered_bm25_query('{"query":"zeta","query_mode":"autocomplete"}'::JSON)
+----
+32
+
+query I
+SELECT count(*) FROM fts_main_many_docs.search_layered_bm25_query('{"query":"zeta","query_mode":"prefix"}'::JSON)
+----
+40
+
+# A one-character prefix takes the raw_dict scan path (no sidecar entry) and, like
+# the sidecar path, applies no term_limit: it returns all 40 matching terms, the
+# case kryonix flagged as potentially scanning a large part of the dictionary.
+query I
+SELECT count(*) FROM fts_main_many_docs.search_layered_bm25_query('{"query":"z","query_mode":"prefix"}'::JSON)
+----
+40
+
+# A high-document-frequency prefix: the DF cap drops it from autocomplete, FTS5 keeps it.
+statement ok
+CREATE TABLE common_docs(id VARCHAR NOT NULL, x VARCHAR)
+
+statement ok
+INSERT INTO common_docs SELECT 'c' || i, 'common filler' || i FROM range(10) AS t(i)
+
+statement ok
+PRAGMA create_fts_index('common_docs', 'id', 'x', stemmer='none', stopwords='none', ignore='(\\.|[^a-z0-9])+', layered_search=true)
+
+query I
+SELECT count(*) FROM fts_main_common_docs.search_layered_bm25_query('{"query":"comm","query_mode":"autocomplete"}'::JSON)
+----
+0
+
+query I
+SELECT count(*) FROM fts_main_common_docs.search_layered_bm25_query('{"query":"comm","query_mode":"prefix"}'::JSON)
+----
+10

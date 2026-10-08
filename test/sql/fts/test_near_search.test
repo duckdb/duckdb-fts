@@ -494,7 +494,7 @@ SELECT
 statement error
 SELECT * FROM fts_main_near_docs.search_layered_bm25('machine learning', query_mode := 'nearby')
 ----
-query_mode must be one of standard, autocomplete, phrase, phrase_prefix, near, wildcard, or regex
+query_mode must be one of standard, exact, prefix, autocomplete, phrase, phrase_prefix, near, wildcard, or regex
 
 query I
 SELECT count(*)

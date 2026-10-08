@@ -338,7 +338,8 @@ query I
 EXECUTE phrase_docnames('the', NULL, 32, 0.15, 50000, true, true, true, true, 1.2, 0.75, 'phrase')
 ----
 
-# Single-token phrase modes are exact/autocomplete fallbacks.
+# Single-token phrase modes use the exact/prefix leaves (intentional FTS5-compat
+# change, #58): a one-token phrase is exact, a one-token phrase-prefix is a prefix.
 statement ok
 PREPARE fallback_compare AS
 SELECT count(*)
@@ -351,12 +352,12 @@ WHERE lhs.docname IS NULL
    OR lhs.rank IS DISTINCT FROM rhs.rank
 
 query I
-EXECUTE fallback_compare('vector', 'phrase', 'standard')
+EXECUTE fallback_compare('vector', 'phrase', 'exact')
 ----
 0
 
 query I
-EXECUTE fallback_compare('dat', 'phrase_prefix', 'autocomplete')
+EXECUTE fallback_compare('dat', 'phrase_prefix', 'prefix')
 ----
 0
 
