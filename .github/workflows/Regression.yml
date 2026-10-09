@@ -66,7 +66,6 @@ jobs:
         env:
           BUILD_BENCHMARK: 1
           DISABLE_SANITIZER: 1
-          EXTENSION_FLAGS: -DLINK_FTS_STATICALLY=1
           GEN: ninja
         run: |
           make release
