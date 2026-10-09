@@ -178,54 +178,42 @@ jobs:
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$LAYERED_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee layered-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$AUTOCOMPLETE_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee autocomplete-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$FIELD_SCORING_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee field-scoring-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$BOOLEAN_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee boolean-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$PHRASE_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee phrase-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$NEW_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$ANALYZER_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee analyzer-smoke.log
 
@@ -233,9 +221,7 @@ jobs:
               --old "$NEW_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$PATTERN_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee pattern-smoke.log
 
@@ -243,9 +229,7 @@ jobs:
               --old "$NEW_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$NEAR_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee near-smoke.log
           }
