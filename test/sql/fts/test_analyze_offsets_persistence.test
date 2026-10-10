@@ -1,0 +1,40 @@
+# name: test/sql/fts/test_analyze_offsets_persistence.test
+# description: Persisted analyze_text autoloads FTS after restart
+# group: [fts]
+
+require fts
+
+require no_alternative_verify
+
+load {TEST_DIR}/analyze_offsets_persistence.db
+
+statement ok
+SET extension_directory='{TEST_DIR}/analyze_offsets_persistence_extensions'
+
+statement ok
+INSTALL '{BUILD_DIRECTORY}/extension/fts/fts.duckdb_extension'
+
+statement ok
+CREATE TABLE documents(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO documents VALUES ('d1', 'Machine Learning')
+
+statement ok
+PRAGMA create_fts_index('documents', 'id', 'body', stemmer='none', stopwords='none')
+
+restart no_extension_load
+
+statement ok
+SET extension_directory='{TEST_DIR}/analyze_offsets_persistence_extensions'
+
+statement ok
+SET autoload_known_extensions=true
+
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_documents.analyze_text('Machine Café')
+ORDER BY position
+----
+machine	1	0	7
+cafe	2	8	13

@@ -1,0 +1,171 @@
+# name: test/sql/fts/test_highlight_snippet.test
+# description: highlight and snippet wrap matched tokens in the original text
+# group: [fts]
+
+require fts
+
+statement ok
+CREATE TABLE hl_docs(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO hl_docs VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('hl_docs', 'id', 'body', stemmer='porter', stopwords='none')
+
+query I
+SELECT fts_main_hl_docs.highlight('The MACHINE, learning fast', 'machine', '[', ']')
+----
+The [MACHINE], learning fast
+
+# Stemming applies: machine also marks machines, unlike unstemmed FTS5.
+query I
+SELECT fts_main_hl_docs.highlight('The MACHINE, learning fast; machines learn.', 'machine', '[', ']')
+----
+The [MACHINE], learning fast; [machines] learn.
+
+query I
+SELECT fts_main_hl_docs.highlight('The MACHINE, learning fast', 'machine learning', '[', ']', query_mode := 'phrase')
+----
+The [MACHINE, learning] fast
+
+query I
+SELECT fts_main_hl_docs.highlight('aa aa aa bb', 'aa aa', '[', ']', query_mode := 'phrase')
+----
+[aa aa aa] bb
+
+query I
+SELECT fts_main_hl_docs.highlight('The MACHINE, learning fast; machines learn.', 'mach', '[', ']', query_mode := 'autocomplete')
+----
+The [MACHINE], learning fast; [machines] learn.
+
+# Near mode marks every matched term; participation is not restricted.
+query I
+SELECT fts_main_hl_docs.highlight('The MACHINE, learning fast', 'machine fast', '[', ']', query_mode := 'near')
+----
+The [MACHINE], learning [fast]
+
+query I
+SELECT fts_main_hl_docs.highlight('machine learning', 'machine machine', '[', ']')
+----
+[machine] learning
+
+query I
+SELECT fts_main_hl_docs.highlight('nothing relevant here', 'absent', '<b>', '</b>')
+----
+nothing relevant here
+
+query I
+SELECT fts_main_hl_docs.highlight('The MACHINE is here', 'machine', '<b>', '</b>')
+----
+The <b>MACHINE</b> is here
+
+query I
+SELECT fts_main_hl_docs.highlight(NULL, 'machine', '[', ']') IS NULL
+----
+true
+
+query I
+SELECT fts_main_hl_docs.highlight('machine here', NULL, '[', ']')
+----
+machine here
+
+query I
+SELECT fts_main_hl_docs.highlight('Café und machine', 'cafe', '[', ']')
+----
+[Café] und machine
+
+statement ok
+CREATE TABLE hl_stop(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO hl_stop VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('hl_stop', 'id', 'body', stemmer='porter', stopwords='english')
+
+# An untruncated edge keeps everything around the kept tokens: stopwords,
+# leading whitespace, and trailing punctuation.
+query I
+SELECT fts_main_hl_stop.snippet('The MACHINE is here.', 'machine', '[', ']', '...', 64)
+----
+The [MACHINE] is here.
+
+query I
+SELECT fts_main_hl_stop.snippet('   machine leads', 'machine', '[', ']', '...', 64)
+----
+   [machine] leads
+
+query I
+SELECT fts_main_hl_stop.snippet('one machine two', 'machine', '[', ']', '...', 9223372036854775807)
+----
+one [machine] two
+
+query I
+SELECT fts_main_hl_docs.highlight('', 'machine', '[', ']')
+----
+(empty)
+
+statement error
+SELECT fts_main_hl_docs.snippet('machine', 'machine', '[', ']', '...', 0)
+----
+max_tokens must be a positive integer
+
+statement error
+SELECT fts_main_hl_docs.snippet('machine', 'machine', '[', ']', '...', 2.7)
+----
+max_tokens must be a positive integer
+
+query I
+SELECT fts_main_hl_docs.snippet('The MACHINE, learning fast; machines learn. Unrelated tail sentence here to make the document long', 'machine', '[', ']', '...', 6)
+----
+The [MACHINE], learning fast; [machines] learn...
+
+query I
+SELECT fts_main_hl_docs.snippet('The MACHINE is here', 'machine', '[', ']', '...', 64)
+----
+The [MACHINE] is here
+
+query I
+SELECT fts_main_hl_docs.snippet('completely unrelated column text that is long enough to need truncation somewhere around ten tokens', 'absent', '[', ']', '...', 5)
+----
+completely unrelated column text that...
+
+query I
+SELECT fts_main_hl_docs.snippet('one two three four five six seven machine nine ten', 'machine', '[', ']', '...', 3)
+----
+...seven [machine] nine...
+
+# A phrase keeps the stopword gap the index keeps: `alpha the beta` marks the
+# text that search finds and leaves `alpha beta` alone.
+query I
+SELECT fts_main_hl_stop.highlight('alpha the beta', 'alpha the beta', '[', ']', query_mode := 'phrase')
+----
+[alpha the beta]
+
+query I
+SELECT fts_main_hl_stop.highlight('alpha beta', 'alpha the beta', '[', ']', query_mode := 'phrase')
+----
+alpha beta
+
+statement ok
+CREATE TABLE hl_acc(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO hl_acc VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('hl_acc', 'id', 'body', stemmer='none', stopwords='none', strip_accents=true)
+
+# A stripped accent stays inside the highlight: decomposed "cafe" + U+0301.
+query I
+SELECT fts_main_hl_acc.highlight('cafe' || chr(769), 'cafe', '[', ']') = '[cafe' || chr(769) || ']'
+----
+true
+
+# Decomposed Hangul composes as tokenize() composes it, so a composed query marks it.
+query I
+SELECT fts_main_hl_acc.highlight('x ' || chr(4370) || chr(4449) || chr(4523) || ' y', chr(54620), '[', ']')
+       = 'x [' || chr(4370) || chr(4449) || chr(4523) || '] y'
+----
+true

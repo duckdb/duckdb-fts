@@ -52,6 +52,9 @@ AnalyzeTokenStreamProjectionSQL(AnalyzeTokenStreamProjection projection) {
     return "";
   case AnalyzeTokenStreamProjection::POSITION:
     return ",\n       tokenized.position";
+  case AnalyzeTokenStreamProjection::POSITION_OFFSETS:
+    return ",\n       tokenized.position,\n       tokenized.start_offset,\n"
+           "       tokenized.end_offset";
   case AnalyzeTokenStreamProjection::DOCID_FIELDID:
     return ",\n       tokenized.docid,\n       tokenized.fieldid";
   case AnalyzeTokenStreamProjection::DOCID_FIELDID_POSITION:

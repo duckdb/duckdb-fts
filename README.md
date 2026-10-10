@@ -96,16 +96,48 @@ removed before positions are assigned. Stopwords are removed afterward, so
 leading and internal stopwords remain visible as position gaps.
 
 Current analyzers use a position length of one and the token type `word`.
-Offsets are reserved as nullable, half-open, zero-based UTF-8 byte offsets into
-the original input. They are currently `NULL` because normalization prevents
-the regex and OpenSearch-compatible tokenizers from mapping every token
-reliably back to the original string.
+Offsets are half-open, zero-based UTF-8 byte offsets into the original input.
+Normalization is tracked codepoint by codepoint, so a token's offsets address
+the original bytes even when accent stripping or lowercasing changes the byte
+width. Offsets cover whole original codepoints.
 
 `analyze_text` uses the same generated analyzer definition as bulk indexing,
 incremental maintenance, and query analysis. The lower-level list-returning
 `tokenize` macro remains available for compatibility, but it does not apply
 stopword removal or stemming. Analyzer contract changes are versioned in
 `index_metadata` and require dropping and recreating an existing index.
+
+### `highlight` and `snippet` Functions
+
+```python
+highlight(s, query_string, before, after, query_mode := 'standard')
+
+snippet(s, query_string, before, after, ellipsis, max_tokens,
+        query_mode := 'standard')
+```
+
+Each index schema also contains these two scalar macros, following SQLite
+FTS5's `highlight` and `snippet`. `highlight` wraps every matched token of
+`s` between `before` and `after`, in the original text: case, punctuation,
+and byte widths are preserved through the analyzer's offsets. `snippet`
+renders the `max_tokens`-token window centered on the first match, marking
+truncated edges with `ellipsis`.
+
+A token matches when its analyzed term equals an analyzed query term, so
+stemming applies: on a porter index, `machine` also marks `machines`.
+Dictionary expansions (prefix, substring, fuzzy) are not marked. In `phrase`
+and `phrase_prefix` modes a whole phrase occurrence is wrapped as one span,
+and overlapping spans merge. In `near` mode every matched term is marked,
+without the distance constraint. Wildcard and regex modes are not supported.
+Unmatched text is returned unchanged.
+
+```sql
+SELECT fts_main_documents.highlight(body, 'quack', '<b>', '</b>')
+FROM documents;
+
+SELECT fts_main_documents.snippet(body, 'quack', '[', ']', '...', 8)
+FROM documents;
+```
 
 ### `match_bm25` Function
 

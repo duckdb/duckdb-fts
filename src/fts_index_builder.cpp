@@ -90,6 +90,24 @@ static string TokenizeMacroScript(const QualifiedName &qname,
        {"token_expression", SQLTemplateArgument::TrustedSQL(expr)}});
 }
 
+static string TokenizeSpansMacroScript(const QualifiedName &qname,
+                                       const string &tokenizer,
+                                       const string &ignore, bool strip_accents,
+                                       bool lower) {
+  return RenderSQLTemplate(
+      fts_sql::TOKENIZE_SPANS_MACRO,
+      {{"fts_schema", GetFTSSchemaArgument(qname)},
+       {"tokenizer", SQLTemplateArgument::StringLiteral(tokenizer)},
+       {"ignore", SQLTemplateArgument::StringLiteral(ignore)},
+       {"strip_accents", SQLTemplateArgument::Boolean(strip_accents)},
+       {"lower", SQLTemplateArgument::Boolean(lower)}});
+}
+
+static string HighlightMacrosScript(const QualifiedName &qname) {
+  return RenderSQLTemplate(fts_sql::HIGHLIGHT_MACROS,
+                           {{"fts_schema", GetFTSSchemaArgument(qname)}});
+}
+
 static string AnalyzeTextMacroScript(const QualifiedName &qname,
                                      const FTSAnalyzerConfig &config) {
   return RenderSQLTemplate(
@@ -97,7 +115,7 @@ static string AnalyzeTextMacroScript(const QualifiedName &qname,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
        {"analyzed_tokens",
         SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
-            qname, config, AnalyzeTokenStreamProjection::POSITION))}});
+            qname, config, AnalyzeTokenStreamProjection::POSITION_OFFSETS))}});
 }
 
 static string IndexTablesScript(const QualifiedName &qname,
@@ -409,7 +427,10 @@ string FTSIndexBuilder::Create(const FTSIndexConfig &config,
   result += StopwordsScript(config);
   result += TokenizeMacroScript(qname, config.tokenizer, config.ignore,
                                 config.strip_accents, config.lower);
+  result += TokenizeSpansMacroScript(qname, config.tokenizer, config.ignore,
+                                     config.strip_accents, config.lower);
   result += AnalyzeTextMacroScript(qname, analyzer_config);
+  result += HighlightMacrosScript(qname);
   result += IndexTablesScript(
       qname, config.input_id, config.input_values, GetFTSBuildTermsTable(qname),
       GetFTSBuildDictTable(qname), GetFTSBuildRawDictTable(qname),

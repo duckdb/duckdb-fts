@@ -1,17 +1,26 @@
 CREATE MACRO {{fts_schema}}.analyze_text(s) AS TABLE
-WITH positioned_tokens AS (
-    SELECT token.raw_term,
+WITH fts_extension_autoload AS (
+    -- Bind DuckDB's stable FTS autoload entry before the internal analyzer.
+    SELECT stem('', 'none') AS marker
+),
+positioned_tokens AS (
+    SELECT token.t.raw_term AS raw_term,
+           token.t.start_offset AS start_offset,
+           token.t.end_offset AS end_offset,
            token.position::UINTEGER AS position
-    FROM UNNEST(
+    FROM fts_extension_autoload,
+         UNNEST(
         list_filter(
-            {{fts_schema}}.tokenize(s),
-            lambda value: value IS NOT NULL AND value <> ''
+            {{fts_schema}}.tokenize_spans(s),
+            lambda value: value.raw_term IS NOT NULL AND value.raw_term <> ''
         )
-    ) WITH ORDINALITY AS token(raw_term, position)
+    ) WITH ORDINALITY AS token(t, position)
 ),
 tokenized AS (
     SELECT raw_term,
-           position
+           position,
+           start_offset,
+           end_offset
     FROM positioned_tokens
 ),
 analyzed_tokens AS (
@@ -21,6 +30,8 @@ token_stream AS (
     SELECT raw_term,
            term,
            position,
+           start_offset,
+           end_offset,
            (
                position
                - coalesce(lag(position) OVER (ORDER BY position), 0)
@@ -32,7 +43,7 @@ SELECT raw_term,
        position,
        position_increment,
        1::UINTEGER AS position_length,
-       NULL::UINTEGER AS start_offset,
-       NULL::UINTEGER AS end_offset,
+       start_offset,
+       end_offset,
        'word'::VARCHAR AS token_type
 FROM token_stream;

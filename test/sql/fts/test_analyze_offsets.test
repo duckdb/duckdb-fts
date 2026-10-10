@@ -1,0 +1,205 @@
+# name: test/sql/fts/test_analyze_offsets.test
+# description: analyze_text returns byte offsets into the original string
+# group: [fts]
+
+require fts
+
+statement ok
+CREATE TABLE docs_regex(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO docs_regex VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('docs_regex', 'id', 'body', stemmer='none', stopwords='none')
+
+statement ok
+CREATE TABLE docs_os(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO docs_os VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('docs_os', 'id', 'body', tokenizer='opensearch_standard', stemmer='none', stopwords='none')
+
+statement ok
+CREATE TABLE docs_raw(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO docs_raw VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('docs_raw', 'id', 'body', stemmer='none', stopwords='none', strip_accents=0, lower=0)
+
+statement ok
+CREATE TABLE docs_lower(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO docs_lower VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('docs_lower', 'id', 'body', stemmer='none', stopwords='none', strip_accents=0, lower=1)
+
+statement ok
+CREATE TABLE docs_ignore(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO docs_ignore VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('docs_ignore', 'id', 'body', stemmer='none', stopwords='none', ignore='[0-9]+')
+
+# Offsets are half-open, zero-based UTF-8 byte offsets into the original input.
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_regex.analyze_text('Machine Learning')
+ORDER BY position
+----
+machine	1	0	7
+learning	2	8	16
+
+# Accented characters are wider in the original than after normalization.
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_regex.analyze_text('Café au lait')
+ORDER BY position
+----
+cafe	1	0	5
+au	2	6	8
+lait	3	9	13
+
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_regex.analyze_text('The MACHINE, learning')
+ORDER BY position
+----
+the	1	0	3
+machine	2	4	11
+learning	3	13	21
+
+# A combining mark stripped inside a token changes its byte width.
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_regex.analyze_text('e' || chr(769) || 'x abc')
+ORDER BY position
+----
+ex	1	0	4
+abc	2	5	8
+
+# Without normalization the offsets are the identity mapping.
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_raw.analyze_text('Café au lait')
+ORDER BY position
+----
+Café	1	0	5
+au	2	6	8
+lait	3	9	13
+
+# The OpenSearch-compatible tokenizer emits single-character Han tokens.
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_os.analyze_text('日本語 abc')
+ORDER BY position
+----
+日	1	0	3
+本	2	3	6
+語	3	6	9
+abc	4	10	13
+
+# Lowercasing alone can change the byte width: İ is two bytes, i is one.
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_lower.analyze_text('İstanbul calling')
+ORDER BY position
+----
+istanbul	1	0	9
+calling	2	10	17
+
+query IIII
+SELECT raw_term, position, start_offset, end_offset
+FROM fts_main_docs_ignore.analyze_text('abc123def x')
+ORDER BY position
+----
+abc	1	0	3
+def	2	6	9
+x	3	10	11
+
+query I
+SELECT fts_main_docs_regex.tokenize_spans(NULL) IS NULL
+----
+true
+
+# Normalization can change a character's Unicode class, so these four codepoints
+# tokenize differently if the text is split before it is normalized.
+query II
+SELECT list_transform(fts_main_docs_regex.tokenize_spans(s), lambda t: t.raw_term)
+       = fts_main_docs_regex.tokenize(s),
+       list_transform(fts_main_docs_regex.tokenize_spans(s), lambda t: [t.start_offset, t.end_offset])
+FROM (VALUES ('a' || chr(8622) || 'b'), ('a' || chr(9410) || 'b'), (chr(94192) || 'xy'), (chr(94193) || 'xy')) t(s)
+----
+true	[[0, 5]]
+true	[[0, 5]]
+true	[[4, 6]]
+true	[[4, 6]]
+
+# The span list carries the same tokens as tokenize, empties included.
+query I
+WITH battery(s) AS (
+    VALUES ('Café'), ('ß'), ('İstanbul'), ('ﬁle'), ('ΑΣ'), ('Σοφός'), ('ǅungla'),
+           ('а' || chr(769)), ('e' || chr(769)), ('ĲS'), ('Ⅷ'), ('㎡'),
+           ('a,,b'), (',lead'), ('trail,'), ('  spaced  out  '), ('')
+)
+SELECT count(*) FILTER (
+    WHERE list_transform(fts_main_docs_regex.tokenize_spans(s), lambda t: t.raw_term)
+          IS DISTINCT FROM fts_main_docs_regex.tokenize(s)
+)
+FROM battery
+----
+0
+
+query I
+WITH battery(s) AS (
+    VALUES ('Café'), ('İstanbul'), ('ΑΣ'), ('日本語 abc'), ('machine''s file'), ('')
+)
+SELECT count(*) FILTER (
+    WHERE list_transform(fts_main_docs_os.tokenize_spans(s), lambda t: t.raw_term)
+          IS DISTINCT FROM fts_main_docs_os.tokenize(s)
+)
+FROM battery
+----
+0
+
+query I
+WITH battery(s) AS (
+    VALUES ('Café au lait'), ('MIXED case'), ('a,,b'), ('')
+)
+SELECT count(*) FILTER (
+    WHERE list_transform(fts_main_docs_raw.tokenize_spans(s), lambda t: t.raw_term)
+          IS DISTINCT FROM fts_main_docs_raw.tokenize(s)
+)
+FROM battery
+----
+0
+
+query I
+WITH battery(s) AS (
+    VALUES ('abc123def'), ('123'), ('a1b2c3'), ('İstanbul 42 Café')
+)
+SELECT count(*) FILTER (
+    WHERE list_transform(fts_main_docs_ignore.tokenize_spans(s), lambda t: t.raw_term)
+          IS DISTINCT FROM fts_main_docs_ignore.tokenize(s)
+)
+FROM battery
+----
+0
+
+query I
+SELECT count(*)
+FROM fts_main_docs_regex.analyze_text('The MACHINE, learning Café')
+WHERE start_offset IS NULL OR end_offset IS NULL OR end_offset <= start_offset
+----
+0
+
+statement ok
+SELECT raw_term FROM fts_main_docs_regex.analyze_text(NULL)

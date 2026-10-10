@@ -14,6 +14,7 @@ struct FTSAnalyzerConfig {
 enum class AnalyzeTokenStreamProjection : uint8_t {
   NONE,
   POSITION,
+  POSITION_OFFSETS,
   DOCID_FIELDID,
   DOCID_FIELDID_POSITION,
   TOKEN_POSITION
