@@ -135,3 +135,37 @@ query I
 SELECT fts_main_hl_docs.snippet('one two three four five six seven machine nine ten', 'machine', '[', ']', '...', 3)
 ----
 ...seven [machine] nine...
+
+# A phrase keeps the stopword gap the index keeps: `alpha the beta` marks the
+# text that search finds and leaves `alpha beta` alone.
+query I
+SELECT fts_main_hl_stop.highlight('alpha the beta', 'alpha the beta', '[', ']', query_mode := 'phrase')
+----
+[alpha the beta]
+
+query I
+SELECT fts_main_hl_stop.highlight('alpha beta', 'alpha the beta', '[', ']', query_mode := 'phrase')
+----
+alpha beta
+
+statement ok
+CREATE TABLE hl_acc(id VARCHAR NOT NULL, body VARCHAR)
+
+statement ok
+INSERT INTO hl_acc VALUES ('a', 'placeholder')
+
+statement ok
+PRAGMA create_fts_index('hl_acc', 'id', 'body', stemmer='none', stopwords='none', strip_accents=true)
+
+# A stripped accent stays inside the highlight: decomposed "cafe" + U+0301.
+query I
+SELECT fts_main_hl_acc.highlight('cafe' || chr(769), 'cafe', '[', ']') = '[cafe' || chr(769) || ']'
+----
+true
+
+# Decomposed Hangul composes as tokenize() composes it, so a composed query marks it.
+query I
+SELECT fts_main_hl_acc.highlight('x ' || chr(4370) || chr(4449) || chr(4523) || ' y', chr(54620), '[', ']')
+       = 'x [' || chr(4370) || chr(4449) || chr(4523) || '] y'
+----
+true

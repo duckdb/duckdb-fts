@@ -51,8 +51,24 @@ static void AppendLowered(const string &piece, string &result) {
   }
 }
 
-// Normalizes codepoint by codepoint with the same utf8proc calls the SQL
-// builtins use, recording which original bytes produced which normalized ones.
+// A codepoint that attaches to the one before it: combining marks and the
+// vowel and trailing-consonant Hangul jamo, which only compose with a leading
+// jamo in front of them.
+static bool IsClusterContinuation(int32_t codepoint) {
+  if ((codepoint >= 0x1160 && codepoint <= 0x11FF) ||
+      (codepoint >= 0xD7B0 && codepoint <= 0xD7FF)) {
+    return true;
+  }
+  auto category = utf8proc_category(codepoint);
+  return category == UTF8PROC_CATEGORY_MN || category == UTF8PROC_CATEGORY_MC ||
+         category == UTF8PROC_CATEGORY_ME;
+}
+
+// Normalizes cluster by cluster with the same utf8proc calls the SQL builtins
+// use, recording which original bytes produced which normalized ones. A
+// cluster is a codepoint plus the marks and jamo that follow it, so a stripped
+// accent stays inside the original span of its base letter and decomposed
+// Hangul composes the way it does in the whole-string call.
 static NormalizedText NormalizeWithMap(const char *data, idx_t size,
                                        bool strip_accents, bool lower) {
   NormalizedText result;
@@ -60,8 +76,29 @@ static NormalizedText NormalizeWithMap(const char *data, idx_t size,
   idx_t pos = 0;
   while (pos < size) {
     auto lead = data[pos];
+    int char_size = 1;
+    int32_t codepoint = -1;
     if (!(lead & 0x80)) {
-      // ASCII: accent stripping is a no-op and lowercasing is one branch,
+      codepoint = lead;
+    } else {
+      codepoint = Utf8Proc::UTF8ToCodepoint(data + pos, char_size, size - pos);
+      if (char_size <= 0) {
+        char_size = 1;
+        codepoint = -1;
+      }
+    }
+    auto cluster_end = pos + UnsafeNumericCast<idx_t>(char_size);
+    while (codepoint >= 0 && cluster_end < size) {
+      int next_size = 0;
+      auto next = Utf8Proc::UTF8ToCodepoint(data + cluster_end, next_size,
+                                            size - cluster_end);
+      if (next_size <= 0 || !IsClusterContinuation(next)) {
+        break;
+      }
+      cluster_end += UnsafeNumericCast<idx_t>(next_size);
+    }
+    if (!(lead & 0x80) && cluster_end == pos + 1) {
+      // Lone ASCII: accent stripping is a no-op and lowercasing is one branch,
       // both one-to-one, so consecutive bytes extend one identity run.
       auto c = lower && lead >= 'A' && lead <= 'Z'
                    ? UnsafeNumericCast<char>(lead + 32)
@@ -84,14 +121,8 @@ static NormalizedText NormalizeWithMap(const char *data, idx_t size,
       pos++;
       continue;
     }
-    int char_size = 0;
-    auto codepoint =
-        Utf8Proc::UTF8ToCodepoint(data + pos, char_size, size - pos);
-    if (char_size <= 0) {
-      char_size = 1;
-      codepoint = -1;
-    }
-    string piece(data + pos, UnsafeNumericCast<idx_t>(char_size));
+    auto cluster_size = cluster_end - pos;
+    string piece(data + pos, cluster_size);
     if (codepoint >= 0) {
       if (strip_accents) {
         auto stripped = utf8proc_remove_accents(
@@ -112,10 +143,10 @@ static NormalizedText NormalizeWithMap(const char *data, idx_t size,
       result.pieces.push_back({UnsafeNumericCast<uint32_t>(result.text.size()),
                                UnsafeNumericCast<uint32_t>(piece.size()),
                                UnsafeNumericCast<uint32_t>(pos),
-                               UnsafeNumericCast<uint32_t>(char_size)});
+                               UnsafeNumericCast<uint32_t>(cluster_size)});
       result.text += piece;
     }
-    pos += UnsafeNumericCast<idx_t>(char_size);
+    pos = cluster_end;
   }
   return result;
 }

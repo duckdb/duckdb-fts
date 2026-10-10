@@ -15,6 +15,7 @@ text_tokens AS (
 query_tokens AS (
     SELECT raw_term,
            term,
+           position AS query_position,
            row_number() OVER (ORDER BY position) AS query_index,
            count(*) OVER () AS query_count
     FROM {{fts_schema}}.analyze_text(query_string)
@@ -38,9 +39,11 @@ SELECT anchors.start_offset,
 FROM text_tokens AS anchors
 JOIN text_tokens AS members
   ON members.position >= anchors.position
- AND members.position < anchors.position + (SELECT max(query_tokens.query_count) FROM query_tokens)
+ AND members.position < anchors.position
+     + (SELECT max(query_tokens.query_position) - min(query_tokens.query_position) + 1 FROM query_tokens)
 JOIN query_tokens
-  ON query_tokens.query_index = members.position - anchors.position + 1
+  ON query_tokens.query_position - (SELECT min(query_tokens.query_position) FROM query_tokens)
+     = members.position - anchors.position
  AND (
      members.term = query_tokens.term
      OR (
