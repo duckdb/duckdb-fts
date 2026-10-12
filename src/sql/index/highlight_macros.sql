@@ -59,13 +59,15 @@ JOIN query_tokens
 JOIN text_tokens AS members
   ON members.position = anchors.position + (query_tokens.query_position - query_bounds.first_position)
  -- phrase_prefix: the last slot is the unfinished word, matched on the raw term only; every other slot on the analyzed term.
- AND CASE
-         WHEN lower(query_mode::VARCHAR) = 'phrase_prefix'
-          AND query_tokens.query_position = query_bounds.last_position
-             THEN length(query_tokens.raw_term) >= 2
-              AND starts_with(members.raw_term, query_tokens.raw_term)
-         ELSE members.term = query_tokens.term
-     END
+ -- Spelled as OR: a CASE here took 12 s on a 2,000-token text and ran out of memory beyond 5,000.
+ AND (
+         (query_tokens.query_position <> query_bounds.last_position OR lower(query_mode::VARCHAR) <> 'phrase_prefix')
+         AND members.term = query_tokens.term
+      OR query_tokens.query_position = query_bounds.last_position
+         AND lower(query_mode::VARCHAR) = 'phrase_prefix'
+         AND length(query_tokens.raw_term) >= 2
+         AND starts_with(members.raw_term, query_tokens.raw_term)
+     )
 WHERE lower(query_mode::VARCHAR) IN ('phrase', 'phrase_prefix')
 GROUP BY anchors.position, anchors.start_offset, query_tokens.query_count
 HAVING count(*) = query_tokens.query_count;
