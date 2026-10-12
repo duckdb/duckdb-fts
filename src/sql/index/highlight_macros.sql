@@ -18,13 +18,25 @@ query_tokens AS (
            position AS query_position,
            row_number() OVER (ORDER BY position) AS query_index,
            count(*) OVER () AS query_count
-    FROM {{fts_schema}}.analyze_text(query_string)
+    FROM (
+        SELECT raw_term, term, position
+        FROM {{fts_schema}}.analyze_text(query_string)
+        {{trailing_stopword_token}}
+    ) AS query_stream
+),
+query_bounds AS (
+    SELECT min(query_position) AS first_position,
+           max(query_position) AS last_position
+    FROM query_tokens
 )
+-- Joins and aggregates only: a scalar or IN subquery over these row-dependent CTEs returned
+-- the spans of other rows when several rows ran in one query on the pinned DuckDB.
 SELECT text_tokens.start_offset AS span_start,
        text_tokens.end_offset AS span_end
 FROM text_tokens
+JOIN (SELECT DISTINCT term FROM query_tokens) AS query_terms
+  ON query_terms.term = text_tokens.term
 WHERE lower(query_mode::VARCHAR) IN ('standard', 'near')
-  AND text_tokens.term IN (SELECT query_tokens.term FROM query_tokens)
 UNION ALL
 SELECT text_tokens.start_offset,
        text_tokens.end_offset
@@ -32,29 +44,31 @@ FROM text_tokens
 JOIN query_tokens
   ON (query_tokens.query_index < query_tokens.query_count AND text_tokens.term = query_tokens.term)
   OR (query_tokens.query_index = query_tokens.query_count AND starts_with(text_tokens.raw_term, query_tokens.raw_term))
+-- Search needs at least two characters in the unfinished word and finds nothing otherwise.
+JOIN query_tokens AS final_token
+  ON final_token.query_index = final_token.query_count
+ AND length(final_token.raw_term) >= 2
 WHERE lower(query_mode::VARCHAR) = 'autocomplete'
 UNION ALL
 SELECT anchors.start_offset,
        max(members.end_offset)
 FROM text_tokens AS anchors
-JOIN text_tokens AS members
-  ON members.position >= anchors.position
- AND members.position < anchors.position
-     + (SELECT max(query_tokens.query_position) - min(query_tokens.query_position) + 1 FROM query_tokens)
+CROSS JOIN query_bounds
 JOIN query_tokens
-  ON query_tokens.query_position - (SELECT min(query_tokens.query_position) FROM query_tokens)
-     = members.position - anchors.position
- AND (
-     members.term = query_tokens.term
-     OR (
-         lower(query_mode::VARCHAR) = 'phrase_prefix'
-         AND query_tokens.query_index = query_tokens.query_count
-         AND starts_with(members.raw_term, query_tokens.raw_term)
-     )
- )
+  ON true
+JOIN text_tokens AS members
+  ON members.position = anchors.position + (query_tokens.query_position - query_bounds.first_position)
+ -- phrase_prefix: the last slot is the unfinished word, matched on the raw term only; every other slot on the analyzed term.
+ AND CASE
+         WHEN lower(query_mode::VARCHAR) = 'phrase_prefix'
+          AND query_tokens.query_position = query_bounds.last_position
+             THEN length(query_tokens.raw_term) >= 2
+              AND starts_with(members.raw_term, query_tokens.raw_term)
+         ELSE members.term = query_tokens.term
+     END
 WHERE lower(query_mode::VARCHAR) IN ('phrase', 'phrase_prefix')
-GROUP BY anchors.position, anchors.start_offset
-HAVING count(*) = (SELECT max(query_tokens.query_count) FROM query_tokens);
+GROUP BY anchors.position, anchors.start_offset, query_tokens.query_count
+HAVING count(*) = query_tokens.query_count;
 
 CREATE MACRO {{fts_schema}}.highlight(s, query_string, before, after, query_mode := 'standard') AS (
     WITH matched_spans AS (
@@ -93,10 +107,11 @@ CREATE MACRO {{fts_schema}}.snippet(s, query_string, before, after, ellipsis, ma
                row_number() OVER (ORDER BY position) AS token_index
         FROM {{fts_schema}}.analyze_text(s)
     ),
-    -- Clamped before any arithmetic so an absurd max_tokens cannot overflow.
+    -- Clamped in HUGEINT, the widest type the check below accepts, before narrowing, so a budget above
+    -- BIGINT cannot turn into NULL and shrink the window.
     window_size AS (
-        SELECT least(greatest(try_cast(max_tokens AS BIGINT), 1),
-                     greatest((SELECT count(*) FROM text_tokens), 1)) AS window_tokens
+        SELECT least(greatest(try_cast(max_tokens AS HUGEINT), 1),
+                     greatest((SELECT count(*) FROM text_tokens), 1))::BIGINT AS window_tokens
     ),
     -- The window centers the first matched token and clamps to the document.
     window_start AS (

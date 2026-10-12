@@ -169,3 +169,83 @@ SELECT fts_main_hl_acc.highlight('x ' || chr(4370) || chr(4449) || chr(4523) || 
        = 'x [' || chr(4370) || chr(4449) || chr(4523) || '] y'
 ----
 true
+
+# Several rows in one query do not see each other's spans: a per-row query used to
+# mark every row with the matches of its neighbours.
+query II
+SELECT n, fts_main_hl_docs.highlight(t, q, '[', ']')
+FROM (VALUES (1, 'alpha beta gamma', 'alpha'),
+             (2, 'beta gamma delta', 'gamma'),
+             (3, 'delta alpha beta', 'delta'),
+             (4, 'gamma delta alpha', 'beta')) v(n, t, q)
+ORDER BY n
+----
+1	[alpha] beta gamma
+2	beta [gamma] delta
+3	[delta] alpha beta
+4	gamma delta alpha
+
+query II
+SELECT n, fts_main_hl_stop.highlight(t, q, '[', ']', query_mode := 'phrase')
+FROM (VALUES (1, 'alpha beta', 'alpha the beta'),
+             (2, 'alpha the beta', 'alpha beta'),
+             (3, 'alpha the beta', 'alpha the beta'),
+             (4, 'alpha beta', 'alpha beta')) v(n, t, q)
+ORDER BY n
+----
+1	alpha beta
+2	alpha the beta
+3	[alpha the beta]
+4	[alpha beta]
+
+query II
+SELECT n, fts_main_hl_docs.snippet(t, q, '[', ']', '...', 3)
+FROM (VALUES (1, 'one two three four five six seven machine nine ten', 'one'),
+             (2, 'one two three four five six seven machine nine ten', 'machine'),
+             (3, 'alpha beta gamma delta epsilon', 'epsilon'),
+             (4, 'alpha beta gamma delta epsilon', 'zeta')) v(n, t, q)
+ORDER BY n
+----
+1	[one] two three...
+2	...seven [machine] nine...
+3	...gamma delta [epsilon]
+4	alpha beta gamma...
+
+# phrase_prefix follows search: a stopword at the end is the unfinished word...
+query I
+SELECT fts_main_hl_stop.highlight('alpha inside', 'alpha in', '[', ']', query_mode := 'phrase_prefix')
+----
+[alpha inside]
+
+# ...and the unfinished word is matched on the raw term, not on its stem.
+query I
+SELECT fts_main_hl_docs.highlight('machine running', 'machine runs', '[', ']', query_mode := 'phrase_prefix')
+----
+machine running
+
+query I
+SELECT fts_main_hl_docs.highlight('machine runs runner', 'machine run', '[', ']', query_mode := 'phrase_prefix')
+----
+[machine runs] runner
+
+# Search finds nothing when the unfinished word is a single character, and so does the highlight.
+query I
+SELECT fts_main_hl_docs.highlight('alpha beta', 'alpha b', '[', ']', query_mode := 'phrase_prefix')
+----
+alpha beta
+
+query I
+SELECT fts_main_hl_docs.highlight('alpha beta', 'alpha b', '[', ']', query_mode := 'autocomplete')
+----
+alpha beta
+
+# A budget wider than BIGINT is a budget larger than the text, not one token.
+query I
+SELECT fts_main_hl_docs.snippet('alpha beta gamma delta', 'gamma', '[', ']', '...', 9223372036854775808::HUGEINT)
+----
+alpha beta [gamma] delta
+
+query I
+SELECT fts_main_hl_docs.snippet('alpha beta gamma delta', 'gamma', '[', ']', '...', 170141183460469231731687303715884105727::HUGEINT)
+----
+alpha beta [gamma] delta

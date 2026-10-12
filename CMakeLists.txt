@@ -14,6 +14,7 @@ set(FTS_SQL_ASSETS
     "TOKENIZE_MACRO|src/sql/index/tokenize_macro.sql"
     "TOKENIZE_SPANS_MACRO|src/sql/index/tokenize_spans_macro.sql"
     "HIGHLIGHT_MACROS|src/sql/index/highlight_macros.sql"
+    "HIGHLIGHT_TRAILING_STOPWORD|src/sql/index/highlight_trailing_stopword.sql"
     "ANALYZE_TOKEN_STREAM|src/sql/index/analyze_token_stream.sql"
     "ANALYZE_TEXT_MACRO|src/sql/index/analyze_text_macro.sql"
     "INDEX_TABLES|src/sql/index/index_tables.sql"

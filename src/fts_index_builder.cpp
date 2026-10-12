@@ -103,9 +103,19 @@ static string TokenizeSpansMacroScript(const QualifiedName &qname,
        {"lower", SQLTemplateArgument::Boolean(lower)}});
 }
 
-static string HighlightMacrosScript(const QualifiedName &qname) {
-  return RenderSQLTemplate(fts_sql::HIGHLIGHT_MACROS,
-                           {{"fts_schema", GetFTSSchemaArgument(qname)}});
+static string HighlightMacrosScript(const QualifiedName &qname,
+                                    const FTSAnalyzerConfig &config) {
+  string trailing_stopword_token;
+  if (config.filter_stopwords) {
+    trailing_stopword_token =
+        RenderSQLTemplate(fts_sql::HIGHLIGHT_TRAILING_STOPWORD,
+                          {{"fts_schema", GetFTSSchemaArgument(qname)}});
+  }
+  return RenderSQLTemplate(
+      fts_sql::HIGHLIGHT_MACROS,
+      {{"fts_schema", GetFTSSchemaArgument(qname)},
+       {"trailing_stopword_token",
+        SQLTemplateArgument::TrustedSQL(trailing_stopword_token)}});
 }
 
 static string AnalyzeTextMacroScript(const QualifiedName &qname,
@@ -430,7 +440,7 @@ string FTSIndexBuilder::Create(const FTSIndexConfig &config,
   result += TokenizeSpansMacroScript(qname, config.tokenizer, config.ignore,
                                      config.strip_accents, config.lower);
   result += AnalyzeTextMacroScript(qname, analyzer_config);
-  result += HighlightMacrosScript(qname);
+  result += HighlightMacrosScript(qname, analyzer_config);
   result += IndexTablesScript(
       qname, config.input_id, config.input_values, GetFTSBuildTermsTable(qname),
       GetFTSBuildDictTable(qname), GetFTSBuildRawDictTable(qname),
