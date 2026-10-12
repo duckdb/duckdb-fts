@@ -64,6 +64,27 @@ static bool IsClusterContinuation(int32_t codepoint) {
          category == UTF8PROC_CATEGORY_ME;
 }
 
+// For text that is not pure ASCII, strip_accents adds its result to the string
+// heap as a C string, so tokenize() never sees past the first NUL. Spans must
+// see the same text.
+static idx_t IndexedSize(const char *data, idx_t size, bool strip_accents) {
+  if (!strip_accents) {
+    return size;
+  }
+  bool ascii = true;
+  for (idx_t i = 0; i < size; i++) {
+    if (data[i] & 0x80) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) {
+    return size;
+  }
+  auto nul = static_cast<const char *>(memchr(data, 0, size));
+  return nul ? UnsafeNumericCast<idx_t>(nul - data) : size;
+}
+
 // Normalizes cluster by cluster with the same utf8proc calls the SQL builtins
 // use, recording which original bytes produced which normalized ones. A
 // cluster is a codepoint plus the marks and jamo that follow it, so a stripped
@@ -289,8 +310,11 @@ static void TokenizeSpansFunction(DataChunk &args, ExpressionState &state,
       continue;
     }
     auto input_value = input.GetValue();
+    auto indexed_size =
+        IndexedSize(input_value.GetData(), input_value.GetSize(),
+                    strip_flags[i].GetValue());
     auto normalized =
-        NormalizeWithMap(input_value.GetData(), input_value.GetSize(),
+        NormalizeWithMap(input_value.GetData(), indexed_size,
                          strip_flags[i].GetValue(), lower_flags[i].GetValue());
 
     vector<TokenSpan> spans;
@@ -315,7 +339,7 @@ static void TokenizeSpansFunction(DataChunk &args, ExpressionState &state,
     auto start_offsets = FlatVector::GetDataMutable<uint32_t>(members[1]);
     auto end_offsets = FlatVector::GetDataMutable<uint32_t>(members[2]);
     for (auto &span : spans) {
-      auto mapped = MapSpan(normalized, input_value.GetSize(), span);
+      auto mapped = MapSpan(normalized, indexed_size, span);
       raw_terms[total] = StringVector::AddString(
           members[0], normalized.text.data() + mapped.norm_start,
           mapped.norm_size);
