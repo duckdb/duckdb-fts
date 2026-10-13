@@ -38,3 +38,39 @@ ORDER BY position
 ----
 machine	1	0	7
 cafe	2	8	13
+
+restart no_extension_load
+
+statement ok
+SET extension_directory='{TEST_DIR}/analyze_offsets_persistence_extensions'
+
+statement ok
+SET autoload_known_extensions=true
+
+query I
+SELECT loaded FROM duckdb_extensions() WHERE extension_name='fts'
+----
+false
+
+query I
+SELECT fts_main_documents.tokenize('Machine Café')
+----
+[machine, cafe]
+
+query I
+SELECT loaded FROM duckdb_extensions() WHERE extension_name='fts'
+----
+true
+
+restart no_extension_load
+
+statement ok
+SET extension_directory='{TEST_DIR}/analyze_offsets_persistence_extensions'
+
+statement ok
+SET autoload_known_extensions=true
+
+query I
+SELECT fts_main_documents.highlight('Machine Café', 'cafe', '[', ']')
+----
+Machine [Café]

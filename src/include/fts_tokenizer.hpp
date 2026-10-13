@@ -4,6 +4,7 @@
 
 namespace duckdb {
 
+ScalarFunction GetFTSTokenizeFunction();
 ScalarFunction GetFTSTokenizeSpansFunction();
 
 } // namespace duckdb

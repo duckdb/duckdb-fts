@@ -10,12 +10,12 @@
 #include "duckdb/function/pragma_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "fts_highlight.hpp"
 #include "fts_indexing.hpp"
 #include "fts_near.hpp"
-#include "fts_pattern.hpp"
-#include "fts_highlight.hpp"
 #include "fts_opensearch_tokenizer.hpp"
-#include "fts_tokenize_spans.hpp"
+#include "fts_pattern.hpp"
+#include "fts_tokenizer.hpp"
 #include "fts_unicode_classifier.hpp"
 #include "libstemmer.h"
 #include "utf8proc_wrapper.hpp"
@@ -129,6 +129,7 @@ static void LoadInternal(ExtensionLoader &loader) {
   loader.RegisterFunction(stem_func);
   loader.RegisterFunction(opensearch_standard_tokenize_func);
   loader.RegisterFunction(GetFTSRenderHighlightFunction());
+  loader.RegisterFunction(GetFTSTokenizeFunction());
   loader.RegisterFunction(GetFTSTokenizeSpansFunction());
   loader.RegisterFunction(GetFTSAnalyzePatternFunction());
   loader.RegisterFunction(GetFTSNearTfFunction());

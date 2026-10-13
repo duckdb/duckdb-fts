@@ -1,0 +1,146 @@
+# name: test/sql/fts/test_shared_tokenizer.test
+# description: Tokenization with optional offsets preserves the legacy analyzer contract
+# group: [fts]
+
+require fts
+
+statement ok
+CREATE MACRO legacy_normalize(s, strip, fold) AS
+    CASE WHEN fold THEN lower(CASE WHEN strip THEN strip_accents(s::VARCHAR) ELSE s::VARCHAR END)
+         ELSE CASE WHEN strip THEN strip_accents(s::VARCHAR) ELSE s::VARCHAR END END
+
+statement ok
+CREATE TABLE inputs(s VARCHAR)
+
+statement ok
+INSERT INTO inputs VALUES
+    (NULL), (''), ('A simple ASCII document, with punctuation.'),
+    ('  leading and trailing  '), ('Café İstanbul Ⱥ'), ('Σοφός'), ('日本語 abc'),
+    ('cafe' || chr(769)), (chr(769) || 'word' || chr(769)), (chr(769)),
+    (chr(4370) || chr(4449) || chr(4523)),
+    (chr(4370) || chr(769) || chr(4449) || chr(4523)),
+    (chr(44032) || chr(4523)), (chr(2325) || chr(2364)), (chr(3907)),
+    ('a' || chr(0) || 'b'), ('café' || chr(0) || 'tail'),
+    (chr(0) || 'café'), ('a' || chr(0) || chr(769)),
+    ('a' || chr(8622) || 'b'), ('a' || chr(9410) || 'b'), ('İ' || chr(4449))
+
+# Every configuration uses an independent, whole-string SQL oracle.
+query I
+WITH configurations AS (
+    SELECT strip, fold, ignore
+    FROM (VALUES (true), (false)) a(strip),
+         (VALUES (true), (false)) b(fold),
+         (VALUES ('[^a-z]+'), ('[^\p{L}\p{N}]+'), ('[0-9]+'), ('i'), ('')) c(ignore)
+)
+SELECT count(*)
+FROM inputs, configurations
+WHERE fts_tokenize(s, 'regex', ignore, strip, fold)
+          IS DISTINCT FROM string_split_regex(legacy_normalize(s, strip, fold), '(' || ignore || ')|\s+')
+   OR list_transform(fts_tokenize_spans(s, 'regex', ignore, strip, fold), lambda t: t.raw_term)
+          IS DISTINCT FROM fts_tokenize(s, 'regex', ignore, strip, fold)
+----
+0
+
+query I
+SELECT count(*)
+FROM inputs, (VALUES (true), (false)) a(strip), (VALUES (true), (false)) b(fold)
+WHERE fts_tokenize(s, 'opensearch_standard', '', strip, fold)
+          IS DISTINCT FROM fts_tokenize_opensearch_standard(legacy_normalize(s, strip, fold))
+   OR list_transform(fts_tokenize_spans(s, 'opensearch_standard', '', strip, fold), lambda t: t.raw_term)
+          IS DISTINCT FROM fts_tokenize(s, 'opensearch_standard', '', strip, fold)
+----
+0
+
+# Exercise multiple vectors, filtered inputs and different delimiter cache entries.
+query I
+SELECT count(*)
+FROM range(5000) r(i), inputs
+WHERE i % 3 <> 0
+  AND fts_tokenize(s || i::VARCHAR, 'regex', CASE WHEN i % 2 = 0 THEN '[0-9]+' ELSE '[^a-z]+' END, true, true)
+      IS DISTINCT FROM list_transform(
+          fts_tokenize_spans(s || i::VARCHAR, 'regex', CASE WHEN i % 2 = 0 THEN '[0-9]+' ELSE '[^a-z]+' END, true, true),
+          lambda t: t.raw_term)
+----
+0
+
+# Byte provenance follows composed codepoints and removed marks.
+query I
+SELECT fts_tokenize_spans('x ' || chr(4370) || chr(769) || chr(4449) || chr(4523) || ' z',
+                          'opensearch_standard', '', true, true)
+----
+[{'raw_term': x, 'start_offset': 0, 'end_offset': 1}, {'raw_term': 한, 'start_offset': 2, 'end_offset': 13}, {'raw_term': z, 'start_offset': 14, 'end_offset': 15}]
+
+# Uncomposed characters keep separate origins even when lowercasing changes width.
+query I
+SELECT fts_tokenize_spans('İ' || chr(4449), 'regex', 'i', false, true)
+----
+[{'raw_term': '', 'start_offset': 0, 'end_offset': 0}, {'raw_term': ᅡ, 'start_offset': 2, 'end_offset': 5}]
+
+statement ok
+CREATE TABLE numbers(id VARCHAR, n INTEGER)
+
+statement ok
+INSERT INTO numbers VALUES ('n', 42)
+
+statement ok
+PRAGMA create_fts_index('numbers', 'id', 'n', stemmer='none', stopwords='none', ignore='[!]', layered_search=true)
+
+query I
+SELECT raw_term FROM fts_main_numbers.analyze_text(42)
+----
+42
+
+query I
+SELECT raw_term FROM fts_main_numbers.analyze_text(DATE '2026-10-13')
+----
+2026-10-13
+
+query III
+SELECT raw_term, start_offset, end_offset FROM fts_main_numbers.analyze_text(true)
+----
+true	0	4
+
+query I
+SELECT docname FROM fts_main_numbers.search_layered_bm25('42')
+----
+n
+
+query I
+SELECT list_transform(['hello world', 'testing'], lambda s: fts_main_numbers.tokenize(s))
+----
+[[hello, world], [testing]]
+
+query I
+SELECT list_transform(['hello world', 'testing'], lambda s: list_transform(fts_main_numbers.tokenize_spans(s), lambda t: t.raw_term))
+----
+[[hello, world], [testing]]
+
+statement ok
+CREATE TABLE calculated(body VARCHAR, tokens VARCHAR[] GENERATED ALWAYS AS (fts_main_numbers.tokenize(body)))
+
+statement ok
+INSERT INTO calculated(body) VALUES ('hello world')
+
+query I
+SELECT tokens FROM calculated
+----
+[hello, world]
+
+# A failed compilation must leave the previous cache entry usable during TRY retries.
+query II
+SELECT i, TRY(fts_tokenize('a,b', 'regex', pattern, false, false))
+FROM (VALUES (1, ','), (2, '['), (3, ',')) v(i, pattern)
+ORDER BY i
+----
+1	[a, b]
+2	NULL
+3	[a, b]
+
+query II
+SELECT i, list_transform(TRY(fts_tokenize_spans('a,b', 'regex', pattern, false, false)), lambda t: t.raw_term)
+FROM (VALUES (1, ','), (2, '['), (3, ',')) v(i, pattern)
+ORDER BY i
+----
+1	[a, b]
+2	NULL
+3	[a, b]

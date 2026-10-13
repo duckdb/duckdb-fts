@@ -73,7 +73,8 @@ GROUP BY anchors.position, anchors.start_offset, query_tokens.query_count
 HAVING count(*) = query_tokens.query_count;
 
 CREATE MACRO {{fts_schema}}.highlight(s, query_string, before, after, query_mode := 'standard') AS (
-    WITH matched_spans AS (
+    WITH fts_extension_autoload AS (SELECT stem('', 'none') AS marker),
+    matched_spans AS (
         SELECT spans.span_start,
                spans.span_end
         FROM {{fts_schema}}.__highlight_spans(s, query_string, query_mode) AS spans
@@ -95,10 +96,12 @@ CREATE MACRO {{fts_schema}}.highlight(s, query_string, before, after, query_mode
             ''
         )
     END
+    FROM fts_extension_autoload
 );
 
 CREATE MACRO {{fts_schema}}.snippet(s, query_string, before, after, ellipsis, max_tokens, query_mode := 'standard') AS (
-    WITH matched_spans AS (
+    WITH fts_extension_autoload AS (SELECT stem('', 'none') AS marker),
+    matched_spans AS (
         SELECT spans.span_start,
                spans.span_end
         FROM {{fts_schema}}.__highlight_spans(s, query_string, query_mode) AS spans
@@ -168,4 +171,5 @@ CREATE MACRO {{fts_schema}}.snippet(s, query_string, before, after, ellipsis, ma
             ellipsis
         )
     END
+    FROM fts_extension_autoload
 );

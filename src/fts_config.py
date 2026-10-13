@@ -21,7 +21,7 @@ source_files = [
         'extension/fts/fts_indexing.cpp',
         'extension/fts/fts_highlight.cpp',
         'extension/fts/fts_pattern.cpp',
-        'extension/fts/fts_tokenize_spans.cpp',
+        'extension/fts/fts_tokenizer.cpp',
         'extension/fts/fts_unicode_classifier.cpp',
     ]
 ]

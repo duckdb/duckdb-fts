@@ -62,41 +62,18 @@ static string StopwordsScript(const FTSIndexConfig &config) {
        {"stopwords_table", GetQualifiedTableArgument(config.stopwords_table)}});
 }
 
-static string NormalizeTokenInputExpression(bool strip_accents, bool lower) {
-  string expr = "s::VARCHAR";
-  if (strip_accents) {
-    expr = "strip_accents(" + expr + ")";
-  }
-  if (lower) {
-    expr = "lower(" + expr + ")";
-  }
-  return expr;
-}
-
 static string TokenizeMacroScript(const QualifiedName &qname,
                                   const string &tokenizer, const string &ignore,
-                                  bool strip_accents, bool lower) {
-  auto expr = NormalizeTokenInputExpression(strip_accents, lower);
-  if (tokenizer == "opensearch_standard") {
-    expr = "fts_tokenize_opensearch_standard(" + expr + ")";
-  } else {
-    auto delimiter = "(" + ignore + ")|\\s+";
-    expr = "string_split_regex(" + expr + ", " +
-           SQLString::ToString(delimiter) + ")";
-  }
+                                  bool strip_accents, bool lower,
+                                  bool with_offsets) {
   return RenderSQLTemplate(
       fts_sql::TOKENIZE_MACRO,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
-       {"token_expression", SQLTemplateArgument::TrustedSQL(expr)}});
-}
-
-static string TokenizeSpansMacroScript(const QualifiedName &qname,
-                                       const string &tokenizer,
-                                       const string &ignore, bool strip_accents,
-                                       bool lower) {
-  return RenderSQLTemplate(
-      fts_sql::TOKENIZE_SPANS_MACRO,
-      {{"fts_schema", GetFTSSchemaArgument(qname)},
+       {"macro_name", SQLTemplateArgument::TrustedSQL(
+                          with_offsets ? "tokenize_spans" : "tokenize")},
+       {"tokenize_function",
+        SQLTemplateArgument::TrustedSQL(with_offsets ? "fts_tokenize_spans"
+                                                     : "fts_tokenize")},
        {"tokenizer", SQLTemplateArgument::StringLiteral(tokenizer)},
        {"ignore", SQLTemplateArgument::StringLiteral(ignore)},
        {"strip_accents", SQLTemplateArgument::Boolean(strip_accents)},
@@ -436,9 +413,9 @@ string FTSIndexBuilder::Create(const FTSIndexConfig &config,
   result += SchemaSetupScript(qname);
   result += StopwordsScript(config);
   result += TokenizeMacroScript(qname, config.tokenizer, config.ignore,
-                                config.strip_accents, config.lower);
-  result += TokenizeSpansMacroScript(qname, config.tokenizer, config.ignore,
-                                     config.strip_accents, config.lower);
+                                config.strip_accents, config.lower, false);
+  result += TokenizeMacroScript(qname, config.tokenizer, config.ignore,
+                                config.strip_accents, config.lower, true);
   result += AnalyzeTextMacroScript(qname, analyzer_config);
   result += HighlightMacrosScript(qname, analyzer_config);
   result += IndexTablesScript(
