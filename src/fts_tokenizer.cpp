@@ -1,5 +1,6 @@
 #include "fts_tokenizer.hpp"
 
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
@@ -27,32 +28,47 @@ struct NormalizedPiece {
 struct NormalizedText {
   string text;
   vector<NormalizedPiece> pieces;
+  idx_t source_size;
 };
 
-// Analyzer-version compatibility: SQL strip_accents truncates non-ASCII inputs
-// at NUL. Both tokenization entrypoints retain that existing index contract.
-static idx_t IndexedSize(const char *data, idx_t size, bool strip_accents) {
-  if (!strip_accents) {
-    return size;
-  }
-  bool ascii = true;
+static bool IsASCII(const char *data, idx_t size) {
   for (idx_t i = 0; i < size; i++) {
     if (data[i] & 0x80) {
-      ascii = false;
-      break;
+      return false;
     }
   }
-  if (ascii) {
-    return size;
-  }
-  auto nul = static_cast<const char *>(memchr(data, 0, size));
-  return nul ? UnsafeNumericCast<idx_t>(nul - data) : size;
+  return true;
 }
 
 template <bool WITH_OFFSETS>
 static NormalizedText NormalizeWithMap(const char *data, idx_t size,
                                        bool strip_accents, bool lower) {
   NormalizedText result;
+  result.source_size = size;
+  if (IsASCII(data, size)) {
+    // ASCII normalization preserves every byte boundary. Copy/fold the entire
+    // string rather than decoding and encoding each byte as a codepoint.
+    result.text.assign(data, size);
+    if (lower) {
+      for (auto &c : result.text) {
+        c = StringUtil::CharacterToLower(c);
+      }
+    }
+    if (WITH_OFFSETS && size > 0) {
+      result.pieces.push_back({0, UnsafeNumericCast<uint32_t>(size), 0,
+                               UnsafeNumericCast<uint32_t>(size)});
+    }
+    return result;
+  }
+  // Analyzer-version compatibility: SQL strip_accents truncates non-ASCII
+  // inputs at NUL, even when the non-ASCII character follows that NUL.
+  if (strip_accents) {
+    auto nul = static_cast<const char *>(memchr(data, 0, size));
+    if (nul) {
+      size = UnsafeNumericCast<idx_t>(nul - data);
+      result.source_size = size;
+    }
+  }
   result.text.reserve(size);
   const auto options = utf8proc_option_t(UTF8PROC_STABLE | UTF8PROC_COMPOSE |
                                          UTF8PROC_STRIPMARK);
@@ -252,15 +268,14 @@ static uint32_t MapWithinPiece(const NormalizedPiece &piece,
   return piece.orig_start;
 }
 
-static MappedToken MapSpan(const NormalizedText &normalized, idx_t orig_size,
-                           TokenSpan span) {
+static MappedToken MapSpan(const NormalizedText &normalized, TokenSpan span) {
   MappedToken token{span.norm_start, span.norm_size, 0, 0};
   if (span.norm_size == 0) {
     auto piece = span.norm_start < normalized.text.size()
                      ? PieceContaining(normalized, span.norm_start)
                      : nullptr;
     auto boundary = piece ? MapWithinPiece(*piece, span.norm_start)
-                          : UnsafeNumericCast<uint32_t>(orig_size);
+                          : UnsafeNumericCast<uint32_t>(normalized.source_size);
     token.orig_start = boundary;
     token.orig_end = boundary;
     return token;
@@ -305,11 +320,8 @@ static void TokenizeFunction(DataChunk &args, ExpressionState &state,
       continue;
     }
     auto input_value = input.GetValue();
-    auto indexed_size =
-        IndexedSize(input_value.GetData(), input_value.GetSize(),
-                    strip_flags[i].GetValue());
     auto normalized = NormalizeWithMap<WITH_OFFSETS>(
-        input_value.GetData(), indexed_size, strip_flags[i].GetValue(),
+        input_value.GetData(), input_value.GetSize(), strip_flags[i].GetValue(),
         lower_flags[i].GetValue());
 
     list_entries[i].offset = total;
@@ -330,7 +342,7 @@ static void TokenizeFunction(DataChunk &args, ExpressionState &state,
           string_t(owned_text.GetData() + span.norm_start, span.norm_size);
       if (WITH_OFFSETS) {
         auto &members = StructVector::GetEntries(output);
-        auto mapped = MapSpan(normalized, indexed_size, span);
+        auto mapped = MapSpan(normalized, span);
         FlatVector::GetDataMutable<uint32_t>(members[1])[total] =
             mapped.orig_start;
         FlatVector::GetDataMutable<uint32_t>(members[2])[total] =

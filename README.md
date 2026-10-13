@@ -103,9 +103,9 @@ width. Offsets cover whole original codepoints.
 
 `analyze_text` uses the same tokenizer and generated analyzer definition as bulk
 indexing, incremental maintenance, and query analysis. The tokenizer tracks byte
-offsets only when requested. Inputs are converted to `VARCHAR`. The lower-level list-returning
-`tokenize` macro remains available for compatibility, but it does not apply
-stopword removal or stemming. Analyzer contract changes are versioned in
+offsets only when requested. Inputs are converted to `VARCHAR`. The lower-level
+list-returning `tokenize` macro remains available for compatibility, but it does
+not apply stopword removal or stemming. Analyzer contract changes are versioned in
 `index_metadata` and require dropping and recreating an existing index.
 
 ### `highlight` and `snippet` Functions
@@ -127,10 +127,11 @@ renders a window centered on the first match, marking truncated edges with
 A token matches when its analyzed term equals an analyzed query term, so
 stemming applies: on a porter index, `machine` also marks `machines`.
 Search and highlighting share query analysis, including stopword position gaps,
-single-term mode reductions, and prefix eligibility. Dictionary expansions
-(prefix, substring, fuzzy) are not marked. In `phrase`
-and `phrase_prefix` modes a whole phrase occurrence is wrapped as one span,
-and overlapping spans merge. In `near` mode every matched term is marked,
+single-term mode reductions, and prefix eligibility. Optional dictionary expansions
+used by standard search (prefix, substring, fuzzy) are not marked. `autocomplete`
+and `phrase_prefix` match the final raw query prefix without dictionary expansion
+limits. In `phrase` and `phrase_prefix` modes a whole phrase occurrence is wrapped
+as one span, and overlapping spans merge. In `near` mode every matched term is marked,
 without the distance constraint. Wildcard and regex modes are not supported.
 Unmatched text is returned unchanged.
 
