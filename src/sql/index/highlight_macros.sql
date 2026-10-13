@@ -12,35 +12,42 @@ text_tokens AS (
     FROM fts_extension_autoload,
          {{fts_schema}}.analyze_text(s)
 ),
-{{query_analysis_ctes}}
-SELECT text_tokens.start_offset AS span_start,
-       text_tokens.end_offset AS span_end
-FROM text_tokens
-JOIN (SELECT DISTINCT term FROM query_slots WHERE match_kind = 'term') AS query_terms
-  ON query_terms.term = text_tokens.term
+{{query_analysis_ctes}},
+-- Keep equality and prefix matching separate so the equality branch can use a
+-- hash join, even when the effective query mode is decided at execution time.
+matched_tokens AS (
+    SELECT text_tokens.start_offset,
+           text_tokens.end_offset,
+           text_tokens.position::BIGINT - query_slots.relative_position AS phrase_start
+    FROM text_tokens
+    JOIN query_slots
+      ON query_slots.match_kind = 'term'
+     AND text_tokens.term = query_slots.term
+    UNION ALL
+    SELECT text_tokens.start_offset,
+           text_tokens.end_offset,
+           text_tokens.position::BIGINT - query_slots.relative_position AS phrase_start
+    FROM text_tokens
+    JOIN query_slots
+      ON query_slots.match_kind = 'prefix'
+     AND starts_with(text_tokens.raw_term, query_slots.raw_token)
+)
+SELECT DISTINCT matched_tokens.start_offset AS span_start,
+                matched_tokens.end_offset AS span_end
+FROM matched_tokens
 CROSS JOIN query_shape
-WHERE query_shape.effective_mode IN ('standard', 'near')
+WHERE query_shape.effective_mode IN ('standard', 'near', 'autocomplete')
 UNION ALL
-SELECT text_tokens.start_offset,
-       text_tokens.end_offset
-FROM text_tokens
-JOIN query_slots
-  ON (query_slots.match_kind = 'term' AND text_tokens.term = query_slots.term)
-  OR (query_slots.match_kind = 'prefix' AND starts_with(text_tokens.raw_term, query_slots.raw_token))
-CROSS JOIN query_shape
-WHERE query_shape.effective_mode = 'autocomplete'
-UNION ALL
-SELECT anchors.start_offset,
-       max(members.end_offset)
-FROM text_tokens AS anchors
-CROSS JOIN query_slots
-JOIN text_tokens AS members
-  ON members.position = anchors.position + query_slots.relative_position
- AND ((query_slots.match_kind = 'term' AND members.term = query_slots.term)
-      OR (query_slots.match_kind = 'prefix' AND starts_with(members.raw_term, query_slots.raw_token)))
+-- Slots belong to the same occurrence when their relative positions imply the
+-- same start. Each text/query position pair occurs once, so a complete group
+-- has exactly token_count matches. No join between all pairs of text tokens is
+-- needed, and stopword gaps remain part of the relative positions.
+SELECT min(matched_tokens.start_offset),
+       max(matched_tokens.end_offset)
+FROM matched_tokens
 CROSS JOIN query_shape
 WHERE query_shape.effective_mode IN ('phrase', 'phrase_prefix')
-GROUP BY anchors.position, anchors.start_offset, query_shape.token_count
+GROUP BY matched_tokens.phrase_start, query_shape.token_count
 HAVING count(*) = query_shape.token_count;
 
 CREATE MACRO {{fts_schema}}.highlight(s, query_string, before, after, query_mode := 'standard') AS (

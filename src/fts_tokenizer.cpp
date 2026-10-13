@@ -12,6 +12,8 @@
 #include "utf8proc.hpp"
 #include "utf8proc_wrapper.hpp"
 
+#include <type_traits>
+
 namespace duckdb {
 
 namespace {
@@ -291,6 +293,27 @@ static MappedToken MapSpan(const NormalizedText &normalized, TokenSpan span) {
   return token;
 }
 
+static void WriteToken(VectorWriter<string_t> &writer, string_t text,
+                       const NormalizedText &, TokenSpan span) {
+  writer.WriteStringRef(
+      string_t(text.GetData() + span.norm_start, span.norm_size));
+}
+
+using SpanToken = VectorStructType<string_t, uint32_t, uint32_t>;
+
+static void WriteToken(VectorWriter<SpanToken> &writer, string_t text,
+                       const NormalizedText &normalized, TokenSpan span) {
+  auto mapped = MapSpan(normalized, span);
+  writer.WriteValue([&](VectorWriter<string_t> &term,
+                        VectorWriter<uint32_t> &start,
+                        VectorWriter<uint32_t> &end) {
+    term.WriteStringRef(
+        string_t(text.GetData() + span.norm_start, span.norm_size));
+    start.WriteValue(mapped.orig_start);
+    end.WriteValue(mapped.orig_end);
+  });
+}
+
 } // namespace
 
 template <bool WITH_OFFSETS>
@@ -303,20 +326,20 @@ static void TokenizeFunction(DataChunk &args, ExpressionState &state,
   auto lower_flags = args.data[4].Values<bool>();
 
   result.SetVectorType(VectorType::FLAT_VECTOR);
-  auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
-  auto &list_validity = FlatVector::ValidityMutable(result);
+  ListVector::SetListSize(result, 0);
+  using TokenType =
+      typename std::conditional<WITH_OFFSETS, SpanToken, string_t>::type;
+  auto list_writer =
+      FlatVector::Writer<VectorListType<TokenType>>(result, args.size());
 
   auto &cached_regex = ExecuteFunctionState::GetFunctionState(state)
                            ->Cast<TokenizeLocalState>()
                            .regex;
-  idx_t total = 0;
   for (idx_t i = 0; i < args.size(); i++) {
     auto input = inputs[i];
     if (!input.IsValid() || !tokenizers[i].IsValid() || !ignores[i].IsValid() ||
         !strip_flags[i].IsValid() || !lower_flags[i].IsValid()) {
-      list_validity.SetInvalid(i);
-      list_entries[i].offset = 0;
-      list_entries[i].length = 0;
+      list_writer.WriteNull();
       continue;
     }
     auto input_value = input.GetValue();
@@ -324,31 +347,16 @@ static void TokenizeFunction(DataChunk &args, ExpressionState &state,
         input_value.GetData(), input_value.GetSize(), strip_flags[i].GetValue(),
         lower_flags[i].GetValue());
 
-    list_entries[i].offset = total;
-    ListVector::Reserve(result, total + 1);
     auto &child = ListVector::GetChildMutable(result);
     auto &raw_vector =
         WITH_OFFSETS ? StructVector::GetEntries(child)[0] : child;
     // One owned copy of normalized text; tokens reference its substrings.
     auto owned_text = StringVector::AddString(raw_vector, normalized.text);
+    auto list = list_writer.WriteDynamicList();
     auto emit = [&](idx_t start, idx_t size) {
-      ListVector::Reserve(result, total + 1);
-      auto &output = ListVector::GetChildMutable(result);
-      auto &terms = WITH_OFFSETS ? StructVector::GetEntries(output)[0] : output;
-      auto raw_terms = FlatVector::GetDataMutable<string_t>(terms);
       TokenSpan span{UnsafeNumericCast<uint32_t>(start),
                      UnsafeNumericCast<uint32_t>(size)};
-      raw_terms[total] =
-          string_t(owned_text.GetData() + span.norm_start, span.norm_size);
-      if (WITH_OFFSETS) {
-        auto &members = StructVector::GetEntries(output);
-        auto mapped = MapSpan(normalized, span);
-        FlatVector::GetDataMutable<uint32_t>(members[1])[total] =
-            mapped.orig_start;
-        FlatVector::GetDataMutable<uint32_t>(members[2])[total] =
-            mapped.orig_end;
-      }
-      total++;
+      WriteToken(list.WriteElement(), owned_text, normalized, span);
     };
     if (tokenizers[i].GetValue().GetString() == "opensearch_standard") {
       ScanOpenSearchStandardTokens(normalized.text.data(),
@@ -357,9 +365,7 @@ static void TokenizeFunction(DataChunk &args, ExpressionState &state,
       auto delimiter = "(" + ignores[i].GetValue().GetString() + ")|\\s+";
       SplitRegexWithSpans(normalized.text, cached_regex.Get(delimiter), emit);
     }
-    list_entries[i].length = total - list_entries[i].offset;
   }
-  ListVector::SetListSize(result, total);
 }
 
 template <bool WITH_OFFSETS> static ScalarFunction GetTokenizeFunction() {
