@@ -82,17 +82,11 @@ static string TokenizeMacroScript(const QualifiedName &qname,
 
 static string HighlightMacrosScript(const QualifiedName &qname,
                                     const FTSAnalyzerConfig &config) {
-  string trailing_stopword_token;
-  if (config.filter_stopwords) {
-    trailing_stopword_token =
-        RenderSQLTemplate(fts_sql::HIGHLIGHT_TRAILING_STOPWORD,
-                          {{"fts_schema", GetFTSSchemaArgument(qname)}});
-  }
   return RenderSQLTemplate(
       fts_sql::HIGHLIGHT_MACROS,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
-       {"trailing_stopword_token",
-        SQLTemplateArgument::TrustedSQL(trailing_stopword_token)}});
+       {"query_analysis_ctes",
+        SQLTemplateArgument::TrustedSQL(RenderQueryAnalysis(qname, config))}});
 }
 
 static string AnalyzeTextMacroScript(const QualifiedName &qname,
@@ -309,37 +303,11 @@ static string MatchMacroScript(const QualifiedName &qname,
 
 static string LayeredSearchTableMacroScript(const QualifiedName &qname,
                                             const FTSAnalyzerConfig &config) {
-  auto is_final_token =
-      config.filter_stopwords
-          ? ",\n           generate_subscripts(tokens, 1) = len(tokens) "
-            "AS is_final_token"
-          : "";
-  auto phrase_prefix_stopword_token =
-      config.filter_stopwords
-          ? "UNION ALL\n"
-            "    SELECT tokenized.raw_term AS raw_token,\n"
-            "           NULL::VARCHAR AS term,\n"
-            "           tokenized.token_position\n"
-            "    FROM tokenized\n"
-            "    CROSS JOIN params\n"
-            "    WHERE params.query_mode = 'phrase_prefix'\n"
-            "      AND tokenized.is_final_token\n"
-            "      AND tokenized.raw_term IN (\n"
-            "          SELECT sw\n"
-            "          FROM " +
-                GetFTSSchema(qname) +
-                ".stopwords\n"
-                "      )"
-          : "";
   return RenderSQLTemplate(
       fts_sql::SEARCH_LAYERED_BM25,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
-       {"is_final_token", SQLTemplateArgument::TrustedSQL(is_final_token)},
-       {"analyzed_tokens",
-        SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
-            qname, config, AnalyzeTokenStreamProjection::TOKEN_POSITION))},
-       {"phrase_prefix_stopword_token",
-        SQLTemplateArgument::TrustedSQL(phrase_prefix_stopword_token)},
+       {"query_analysis_ctes",
+        SQLTemplateArgument::TrustedSQL(RenderQueryAnalysis(qname, config))},
        {"field_scoring_config_ctes",
         SQLTemplateArgument::TrustedSQL(FieldScoringConfigCTEs(qname))},
        {"field_scoring_score_ctes",

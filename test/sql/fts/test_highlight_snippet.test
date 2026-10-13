@@ -249,3 +249,20 @@ query I
 SELECT fts_main_hl_docs.snippet('alpha beta gamma delta', 'gamma', '[', ']', '...', 170141183460469231731687303715884105727::HUGEINT)
 ----
 alpha beta [gamma] delta
+
+# Clamp before narrowing, including budgets wider than BIGINT, and never exceed 64.
+query II
+SELECT budget,
+       len(fts_main_hl_docs.tokenize(
+           fts_main_hl_docs.snippet(repeat('alpha ', 120), 'alpha', '', '', '', budget)))
+FROM (VALUES (1::HUGEINT), (63), (64), (65), (100),
+             (9223372036854775808), (170141183460469231731687303715884105727)) budgets(budget)
+ORDER BY budget
+----
+1	1
+63	63
+64	64
+65	64
+100	64
+9223372036854775808	64
+170141183460469231731687303715884105727	64

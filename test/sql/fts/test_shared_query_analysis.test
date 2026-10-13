@@ -1,0 +1,205 @@
+# name: test/sql/fts/test_shared_query_analysis.test
+# description: Search and highlighting share query slots, positions and prefix eligibility
+# group: [fts]
+
+require fts
+
+statement ok
+CREATE TABLE shared_docs(id VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO shared_docs VALUES ('a','alpha inside'), ('b','alpha the beta'), ('c','alpha beta'),
+    ('d','machine running'), ('e','machine runs'), ('f','the alpha beta'), ('g','running'),
+    ('h','placeholder'), ('i','alpha theory'), ('j','android')
+
+foreach stemmer none porter
+
+foreach tokenizer regex opensearch_standard
+
+statement ok
+PRAGMA create_fts_index('shared_docs','id','body',stemmer='{stemmer}',stopwords='english',tokenizer='{tokenizer}',layered_search=true,overwrite=true)
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha the beta',query_mode:='phrase',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha the beta','[',']',query_mode:='phrase') <> body)
+----
+[b]	[b]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha beta',query_mode:='phrase',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha beta','[',']',query_mode:='phrase') <> body)
+----
+[c, f]	[c, f]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('machine runs',query_mode:='phrase_prefix',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'machine runs','[',']',query_mode:='phrase_prefix') <> body)
+----
+[e]	[e]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha in',query_mode:='phrase_prefix',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha in','[',']',query_mode:='phrase_prefix') <> body)
+----
+[a]	[a]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha b',query_mode:='phrase_prefix',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha b','[',']',query_mode:='phrase_prefix') <> body)
+----
+[]	[]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha b',query_mode:='autocomplete',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha b','[',']',query_mode:='autocomplete') <> body)
+----
+[a, b, c, f, i]	[a, b, c, f, i]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha be',query_mode:='autocomplete',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha be','[',']',query_mode:='autocomplete') <> body)
+----
+[a, b, c, f, i]	[a, b, c, f, i]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha',query_mode:='phrase',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha','[',']',query_mode:='phrase') <> body)
+----
+[a, b, c, f, i]	[a, b, c, f, i]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('run',query_mode:='phrase_prefix',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'run','[',']',query_mode:='phrase_prefix') <> body)
+----
+[d, e, g]	[d, e, g]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha the',query_mode:='phrase_prefix',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha the','[',']',query_mode:='phrase_prefix') <> body)
+----
+[i]	[i]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('the',query_mode:='phrase_prefix',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'the','[',']',query_mode:='phrase_prefix') <> body)
+----
+[i]	[i]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('the and',query_mode:='phrase_prefix',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'the and','[',']',query_mode:='phrase_prefix') <> body)
+----
+[j]	[j]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('the',query_mode:='phrase',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'the','[',']',query_mode:='phrase') <> body)
+----
+[]	[]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('',query_mode:='standard',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'','[',']',query_mode:='standard') <> body)
+----
+[]	[]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha alpha',query_mode:='phrase',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha alpha','[',']',query_mode:='phrase') <> body)
+----
+[]	[]
+
+query II
+SELECT
+    (SELECT coalesce(list(docname ORDER BY docname), [])
+     FROM fts_main_shared_docs.search_layered_bm25('alpha alpha',query_mode:='near',
+         enable_prefix:=false,enable_substring:=false,enable_fuzzy:=false,max_df_ratio:=1,max_df:=100000,top_k:=100)),
+    (SELECT coalesce(list(id ORDER BY id), []) FROM shared_docs
+     WHERE fts_main_shared_docs.highlight(body,'alpha alpha','[',']',query_mode:='near') <> body)
+----
+[a, b, c, f, i]	[a, b, c, f, i]
+
+query II
+SELECT n, fts_main_shared_docs.highlight(t,q,'[',']',query_mode:=m)
+FROM (VALUES (1,'alpha beta','alpha the beta','phrase'),
+             (2,'alpha the beta','alpha the beta','phrase'),
+             (3,'alpha inside','alpha in','phrase_prefix'),
+             (4,'machine running','machine runs','phrase_prefix'),
+             (5,'alpha beta','alpha b','autocomplete'),
+             (6,'alpha beta',NULL,'phrase'),
+             (7,NULL,'alpha','standard'),
+             (8,'alpha beta','alpha alpha','near')) v(n,t,q,m)
+ORDER BY n
+----
+1	alpha beta
+2	[alpha the beta]
+3	[alpha inside]
+4	machine running
+5	[alpha] beta
+6	alpha beta
+7	NULL
+8	[alpha] beta
+
+endloop
+
+endloop

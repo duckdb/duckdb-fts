@@ -90,6 +90,23 @@ string RenderAnalyzeTokenStream(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(stopwords_filter)}});
 }
 
+string RenderQueryAnalysis(const QualifiedName &qname,
+                           const FTSAnalyzerConfig &config) {
+  auto trailing_stopword =
+      config.filter_stopwords
+          ? RenderSQLTemplate(fts_sql::QUERY_TRAILING_STOPWORD,
+                              {{"fts_schema", GetFTSSchemaArgument(qname)}})
+          : "";
+  return RenderSQLTemplate(
+      fts_sql::QUERY_ANALYSIS_CTES,
+      {{"fts_schema", GetFTSSchemaArgument(qname)},
+       {"analyzed_tokens",
+        SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
+            qname, config, AnalyzeTokenStreamProjection::TOKEN_POSITION))},
+       {"trailing_stopword_token",
+        SQLTemplateArgument::TrustedSQL(trailing_stopword)}});
+}
+
 vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname) {
   auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
   return {prefix + "00_docs", prefix + "10_dict_insert", prefix + "20_terms",

@@ -72,67 +72,25 @@ df_cap(max_df) AS (
     FROM {{fts_schema}}.stats AS stats
     CROSS JOIN params
 ),
-tokenized AS (
-    SELECT unnest(tokens) AS raw_term,
-           generate_subscripts(tokens, 1)::BIGINT AS token_position{{is_final_token}}
-    FROM (
-        SELECT list_filter(
-                   {{fts_schema}}.tokenize(query_string),
-                   lambda token: token IS NOT NULL AND token <> ''
-               ) AS tokens
-    ) AS query_token_list
-),
-query_analyzer_tokens AS (
-    SELECT analyzed.raw_term AS raw_token,
-           analyzed.term,
-           analyzed.token_position
-    FROM (
-        {{analyzed_tokens}}
-    ) AS analyzed
-    {{phrase_prefix_stopword_token}}
-),
-query_shape AS (
-    SELECT count(*)::BIGINT AS token_count,
-           max(token_position) AS final_position,
-           CASE
-               WHEN params.query_mode = 'phrase'
-                AND count(*) = 1
-                   THEN 'standard'
-               WHEN params.query_mode = 'phrase_prefix'
-                AND count(*) = 1
-                   THEN 'autocomplete'
-               WHEN params.query_mode = 'near'
-                AND count(DISTINCT term) = 1
-                   THEN 'standard'
-               ELSE params.query_mode
-           END AS effective_mode
-    FROM query_analyzer_tokens
-    CROSS JOIN params
-    GROUP BY params.query_mode
-),
+{{query_analysis_ctes}},
 autocomplete_final_token AS (
     SELECT raw_token AS query_term,
            length(raw_token)::BIGINT AS query_len,
            least(length(raw_token), 3)::UTINYINT AS prefix_len,
            substr(raw_token, 1, least(length(raw_token), 3)) AS prefix
-    FROM query_analyzer_tokens
+    FROM query_slots
     CROSS JOIN query_shape
     WHERE query_shape.effective_mode = 'autocomplete'
-      AND token_position = query_shape.final_position
-      AND length(raw_token) >= 2
+      AND match_kind = 'prefix'
 ),
 stemmed_tokens AS (
     SELECT DISTINCT query_term
     FROM (
         SELECT term AS query_term
-        FROM query_analyzer_tokens
+        FROM query_slots
         CROSS JOIN query_shape
-        WHERE query_shape.effective_mode = 'standard'
-           OR (
-               query_shape.effective_mode = 'autocomplete'
-               AND token_position < query_shape.final_position
-               AND EXISTS (SELECT 1 FROM autocomplete_final_token)
-           )
+        WHERE query_shape.effective_mode IN ('standard', 'autocomplete')
+          AND match_kind = 'term'
     ) AS stemmed_query
     WHERE query_term IS NOT NULL
       AND query_term <> ''
@@ -388,9 +346,10 @@ phrase_tokens AS (
     SELECT raw_token,
            term,
            token_position,
-           token_position - 1 AS relative_position,
-           token_position AS phrase_slot
-    FROM query_analyzer_tokens
+           relative_position,
+           token_position AS phrase_slot,
+           match_kind
+    FROM query_slots
     CROSS JOIN query_shape
     WHERE query_shape.effective_mode IN ('phrase', 'phrase_prefix')
 ),
@@ -402,9 +361,7 @@ phrase_exact_slots AS (
     FROM phrase_tokens
     JOIN {{fts_schema}}.term_stats AS term_stats
       ON term_stats.term = phrase_tokens.term
-    CROSS JOIN query_shape
-    WHERE query_shape.effective_mode = 'phrase'
-       OR phrase_tokens.token_position < query_shape.final_position
+    WHERE phrase_tokens.match_kind = 'term'
 ),
 phrase_prefix_input AS (
     SELECT phrase_tokens.raw_token AS query_term,
@@ -416,10 +373,7 @@ phrase_prefix_input AS (
            ) AS prefix,
            phrase_tokens.relative_position
     FROM phrase_tokens
-    CROSS JOIN query_shape
-    WHERE query_shape.effective_mode = 'phrase_prefix'
-      AND phrase_tokens.token_position = query_shape.final_position
-      AND length(phrase_tokens.raw_token) >= 2
+    WHERE phrase_tokens.match_kind = 'prefix'
 ),
 phrase_prefix_candidates AS (
     SELECT raw_dict.termid,
@@ -560,10 +514,8 @@ near_slots AS (
 ),
 near_slot_count AS (
     -- Counted over query terms, not found ones: an absent term must leave a slot no posting can fill.
-    SELECT count(DISTINCT query_analyzer_tokens.term)::BIGINT AS slot_count
-    FROM query_analyzer_tokens
-    CROSS JOIN query_shape
-    WHERE query_shape.effective_mode = 'near'
+    SELECT CASE WHEN effective_mode = 'near' THEN distinct_term_count ELSE 0 END AS slot_count
+    FROM query_shape
 ),
 near_window AS (
     -- near_distance excludes the first and last term, so the span is near_distance + 1; the cap keeps it inside INT64.

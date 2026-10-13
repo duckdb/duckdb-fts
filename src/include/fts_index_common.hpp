@@ -29,6 +29,9 @@ string RenderAnalyzeTokenStream(const QualifiedName &qname,
                                 const FTSAnalyzerConfig &config,
                                 AnalyzeTokenStreamProjection projection);
 
+string RenderQueryAnalysis(const QualifiedName &qname,
+                           const FTSAnalyzerConfig &config);
+
 vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname);
 vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname);
 vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname);

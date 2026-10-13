@@ -101,8 +101,9 @@ Normalization is tracked codepoint by codepoint, so a token's offsets address
 the original bytes even when accent stripping or lowercasing changes the byte
 width. Offsets cover whole original codepoints.
 
-`analyze_text` uses the same generated analyzer definition as bulk indexing,
-incremental maintenance, and query analysis. The lower-level list-returning
+`analyze_text` uses the same tokenizer and generated analyzer definition as bulk
+indexing, incremental maintenance, and query analysis. The tokenizer tracks byte
+offsets only when requested. Inputs are converted to `VARCHAR`. The lower-level list-returning
 `tokenize` macro remains available for compatibility, but it does not apply
 stopword removal or stemming. Analyzer contract changes are versioned in
 `index_metadata` and require dropping and recreating an existing index.
@@ -120,12 +121,14 @@ Each index schema also contains these two scalar macros, following SQLite
 FTS5's `highlight` and `snippet`. `highlight` wraps every matched token of
 `s` between `before` and `after`, in the original text: case, punctuation,
 and byte widths are preserved through the analyzer's offsets. `snippet`
-renders the `max_tokens`-token window centered on the first match, marking
-truncated edges with `ellipsis`.
+renders a window centered on the first match, marking truncated edges with
+`ellipsis`. `max_tokens` must be a positive integer and is capped at 64.
 
 A token matches when its analyzed term equals an analyzed query term, so
 stemming applies: on a porter index, `machine` also marks `machines`.
-Dictionary expansions (prefix, substring, fuzzy) are not marked. In `phrase`
+Search and highlighting share query analysis, including stopword position gaps,
+single-term mode reductions, and prefix eligibility. Dictionary expansions
+(prefix, substring, fuzzy) are not marked. In `phrase`
 and `phrase_prefix` modes a whole phrase occurrence is wrapped as one span,
 and overlapping spans merge. In `near` mode every matched term is marked,
 without the distance constraint. Wildcard and regex modes are not supported.
