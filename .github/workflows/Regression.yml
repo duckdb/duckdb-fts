@@ -240,14 +240,13 @@ jobs:
               --verbose 2>&1 | tee pattern-smoke.log
 
             python3 duckdb/scripts/regression/test_runner.py \
-              --old "$NEW_RUNNER" \
+              --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$NEAR_BENCHMARKS" \
               --root-dir . \
               --threads 2 \
               --clear-benchmark-cache \
-              --nofail \
-              --verbose 2>&1 | tee near-smoke.log
+              --verbose 2>&1 | tee near-regression.log
           }
 
           export -f run_benchmarks
@@ -295,9 +294,9 @@ jobs:
             echo '```text'
             test ! -f pattern-smoke.log || cat pattern-smoke.log
             echo '```'
-            echo '## FTS near-query smoke'
+            echo '## FTS near-query regression'
             echo '```text'
-            test ! -f near-smoke.log || cat near-smoke.log
+            test ! -f near-regression.log || cat near-regression.log
             echo '```'
             echo '## FTS positional index footprint'
             echo '```text'
@@ -318,6 +317,6 @@ jobs:
             phrase-regression.log
             analyzer-smoke.log
             pattern-smoke.log
-            near-smoke.log
+            near-regression.log
             phrase-footprint.log
           if-no-files-found: ignore
