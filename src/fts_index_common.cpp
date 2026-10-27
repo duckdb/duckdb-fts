@@ -52,6 +52,9 @@ AnalyzeTokenStreamProjectionSQL(AnalyzeTokenStreamProjection projection) {
     return "";
   case AnalyzeTokenStreamProjection::POSITION:
     return ",\n       tokenized.position";
+  case AnalyzeTokenStreamProjection::POSITION_OFFSETS:
+    return ",\n       tokenized.position,\n       tokenized.start_offset,\n"
+           "       tokenized.end_offset";
   case AnalyzeTokenStreamProjection::DOCID_FIELDID:
     return ",\n       tokenized.docid,\n       tokenized.fieldid";
   case AnalyzeTokenStreamProjection::DOCID_FIELDID_POSITION:
@@ -85,6 +88,23 @@ string RenderAnalyzeTokenStream(const QualifiedName &qname,
                                  AnalyzeTokenStreamProjectionSQL(projection))},
        {"stopwords_filter",
         SQLTemplateArgument::TrustedSQL(stopwords_filter)}});
+}
+
+string RenderQueryAnalysis(const QualifiedName &qname,
+                           const FTSAnalyzerConfig &config) {
+  auto trailing_stopword =
+      config.filter_stopwords
+          ? RenderSQLTemplate(fts_sql::QUERY_TRAILING_STOPWORD,
+                              {{"fts_schema", GetFTSSchemaArgument(qname)}})
+          : "";
+  return RenderSQLTemplate(
+      fts_sql::QUERY_ANALYSIS_CTES,
+      {{"fts_schema", GetFTSSchemaArgument(qname)},
+       {"analyzed_tokens",
+        SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
+            qname, config, AnalyzeTokenStreamProjection::TOKEN_POSITION))},
+       {"trailing_stopword_token",
+        SQLTemplateArgument::TrustedSQL(trailing_stopword)}});
 }
 
 vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname) {
