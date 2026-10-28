@@ -65,10 +65,9 @@ indexed under a new `docid`. Updating only columns that are not indexed leaves
 the index unchanged, but the triggers still fire and compare the old and new
 versions of every updated row, so large updates of such columns are slower than
 on a table without an incremental index. An `UPDATE` that would give two rows
-the same document id
-fails, just like an `INSERT`. Incremental indexes created by older versions of
-the extension are not maintained for `UPDATE` statements; recreate them with
-`overwrite = true` to add the `UPDATE` triggers.
+the same document id fails, just like an `INSERT`. Incremental indexes created
+by older versions of the extension are not maintained for `UPDATE` statements;
+recreate them with `overwrite = true` to add the `UPDATE` triggers.
 
 `cluster_terms = true` changes only the physical ordering of the generated
 `terms` table. For incremental indexes, the initial index build uses the
