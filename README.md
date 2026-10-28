@@ -43,7 +43,7 @@ create_fts_index(input_table, input_id, *input_values, stemmer = 'porter',
 | `strip_accents` | `BOOLEAN` | Whether to remove accents (e.g., convert `á` to `a`). Defaults to `1` for `'regex'` and `0` for `'opensearch_standard'`. `strip_accents=true` is not supported with `'opensearch_standard'` because OpenSearch's standard analyzer lowercases tokens but does not strip accents |
 | `lower` | `BOOLEAN` | Whether to convert all text to lowercase. Defaults to `1` |
 | `overwrite` | `BOOLEAN` | Whether to overwrite an existing index on a table. Defaults to `0` |
-| `incremental` | `BOOLEAN` | Whether to maintain the FTS index with triggers after inserts and deletes on the input table. Defaults to `0` |
+| `incremental` | `BOOLEAN` | Whether to maintain the FTS index with triggers after inserts, updates, and deletes on the input table. Defaults to `0` |
 | `cluster_terms` | `BOOLEAN` | Whether to physically order the generated `terms` table by `termid`, `fieldid`, and `docid`. This can improve query-time pruning for direct reads from the FTS tables. Defaults to `0` |
 | `layered_search` | `BOOLEAN` | Whether to build the dictionary sidecars, positional postings, and layered search macros used by expanded, autocomplete, phrase, phrase-prefix, near, wildcard, and regex queries. This implies `cluster_terms`. Defaults to `0` |
 
@@ -54,10 +54,18 @@ This `PRAGMA` builds the index under a newly created schema. The schema will be 
 By default, indexes are static snapshots. If the input table changes after
 index creation, rebuild the index with `overwrite = true` or use
 `incremental = true` when creating the index. Incremental indexes are maintained
-with triggers for `INSERT` and `DELETE` statements. They require trigger
-support, a document id column declared `NOT NULL` or `PRIMARY KEY`, and unique
-document id values. Persistent databases must use storage version `v2.0.0` or
-newer for incremental indexes.
+with triggers for `INSERT`, `UPDATE`, and `DELETE` statements. They require
+trigger support, a document id column declared `NOT NULL` or `PRIMARY KEY`, and
+unique document id values. Persistent databases must use storage version
+`v2.0.0` or newer for incremental indexes.
+
+An `UPDATE` reindexes only the rows whose document id or indexed columns
+changed: their old version is removed from the index and the new version is
+indexed under a new `docid`. Updating only columns that are not indexed leaves
+the index untouched. An `UPDATE` that would give two rows the same document id
+fails, just like an `INSERT`. Incremental indexes created by older versions of
+the extension are not maintained for `UPDATE` statements; recreate them with
+`overwrite = true` to add the `UPDATE` triggers.
 
 `cluster_terms = true` changes only the physical ordering of the generated
 `terms` table. For incremental indexes, the initial index build uses the
@@ -311,7 +319,7 @@ Layered search can be static or incremental. With `layered_search = true` and
 `incremental = false`, the sidecar tables are built once and later table
 changes are not visible until the index is rebuilt. With both options enabled,
 the sidecar tables are maintained together with the base FTS index for
-`INSERT` and `DELETE`.
+`INSERT`, `UPDATE`, and `DELETE`.
 
 Indexes store a compact field-length list on each document row and corpus
 average lengths in the statistics row. Layered indexes additionally store a
@@ -497,8 +505,8 @@ ORDER BY score DESC;
 |---------------------|------------------------------------------------------------|------:|
 | doc2                | The cat is a domestic species of small carnivorous mammal. | 0.0   |
 
-Build an incremental index when inserts and deletes should update the index
-automatically. The document identifier must be non-null and unique:
+Build an incremental index when inserts, updates, and deletes should update the
+index automatically. The document identifier must be non-null and unique:
 
 ```sql
 CREATE TABLE live_documents (
@@ -518,6 +526,10 @@ PRAGMA create_fts_index(
 );
 
 INSERT INTO live_documents VALUES ('doc3', 'meowing');
+
+UPDATE live_documents
+SET text_content = 'meowing quacking'
+WHERE document_identifier = 'doc1';
 
 SELECT document_identifier
 FROM (
@@ -651,8 +663,8 @@ FROM fts_main_animal_sounds.search_layered_bm25(
 > will not update automatically when the input table changes. Static layered
 > indexes behave the same way: their sidecar tables are also rebuilt only when
 > the index is rebuilt. With `incremental = true`, the index and layered
-> sidecar are maintained for `INSERT` and `DELETE` statements on tables that
-> support triggers.
+> sidecar are maintained for `INSERT`, `UPDATE`, and `DELETE` statements on
+> tables that support triggers.
 
 ## Stemmers
 
