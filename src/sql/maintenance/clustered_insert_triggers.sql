@@ -1,5 +1,5 @@
-CREATE TRIGGER {{trigger_00_docs}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_00_docs}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.docs (docid, name, len, field_lens)
     WITH {{docs_new_docs_cte}},
@@ -23,8 +23,8 @@ FOR EACH STATEMENT
     FROM fts_new_docs AS nd
     LEFT JOIN lengths ON lengths.docid = nd.docid;
 
-CREATE TRIGGER {{trigger_10_dict_insert}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_10_dict_insert}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.dict (termid, term, df)
     {{token_ctes}},
@@ -39,8 +39,8 @@ FOR EACH STATEMENT
            0 AS df
     FROM new_terms;
 
-CREATE TRIGGER {{trigger_20_terms_store}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_20_terms_store}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.{{terms_storage_table}} (termid, docid, fieldid)
     {{token_ctes}}
@@ -50,8 +50,8 @@ FOR EACH STATEMENT
     FROM stemmed_stopped AS ss
     JOIN {{fts_schema}}.dict AS d ON ss.term = d.term;
 
-CREATE TRIGGER {{trigger_30_dict_df}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_30_dict_df}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     UPDATE {{fts_schema}}.dict AS d
     SET df = d.df + inserted_df_delta.df_delta
@@ -60,12 +60,12 @@ FOR EACH STATEMENT
                COUNT(DISTINCT t.docid) AS df_delta
         FROM {{fts_schema}}.{{terms_storage_table}} AS t
         JOIN {{fts_schema}}.docs AS docs ON t.docid = docs.docid
-        JOIN fts_new_rows AS new_rows ON docs.name = new_rows.{{input_id}}
+        JOIN {{new_rows}} AS new_rows ON docs.name = new_rows.{{input_id}}
         GROUP BY t.termid
     ) AS inserted_df_delta
     WHERE d.termid = inserted_df_delta.termid;
 
-CREATE TRIGGER {{trigger_40_stats}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_40_stats}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     {{stats_delta_update}};

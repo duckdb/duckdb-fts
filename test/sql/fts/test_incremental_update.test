@@ -1,0 +1,188 @@
+# name: test/sql/fts/test_incremental_update.test
+# description: Test that updating an indexed table updates docs, dict, terms, and stats
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE docs (id VARCHAR NOT NULL, title VARCHAR, body VARCHAR, views INTEGER)
+
+statement ok
+INSERT INTO docs VALUES
+    ('doc1', 'ducks', 'quacking quacking quacking', 0),
+    ('doc2', 'dogs', 'barking barking barking barking', 0)
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'title', 'body', stemmer='porter', stopwords='none', incremental=true)
+
+# UPDATE triggers run after the INSERT and DELETE ones were created; the
+# unindex steps sort before the index steps
+query I
+SELECT trigger_name FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_fts_main_docs_au_%' ORDER BY trigger_name
+----
+__fts_fts_main_docs_au_del_00_dict_df
+__fts_fts_main_docs_au_del_10_terms
+__fts_fts_main_docs_au_del_15_stats
+__fts_fts_main_docs_au_del_20_docs
+__fts_fts_main_docs_au_del_30_dict_prune
+__fts_fts_main_docs_au_ins_00_docs
+__fts_fts_main_docs_au_ins_10_dict_insert
+__fts_fts_main_docs_au_ins_20_terms
+__fts_fts_main_docs_au_ins_30_dict_df
+__fts_fts_main_docs_au_ins_40_stats
+
+# updating a non-indexed column, or writing back the same text, does not
+# reindex the document
+statement ok
+UPDATE docs SET views = views + 1
+
+statement ok
+UPDATE docs SET body = body WHERE id = 'doc1'
+
+query III
+SELECT name, docid, len FROM fts_main_docs.docs ORDER BY name
+----
+doc1	0	4
+doc2	1	5
+
+# changing the text reindexes only that document
+statement ok
+UPDATE docs SET body = 'barking meowing meowing' WHERE id = 'doc1'
+
+query III
+SELECT name, docid, len FROM fts_main_docs.docs ORDER BY name
+----
+doc1	2	4
+doc2	1	5
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+bark	2
+dog	1
+duck	1
+meow	1
+
+query IIII
+SELECT d.name, t.fieldid, dict.term, count(*) AS tf
+FROM fts_main_docs.terms AS t
+JOIN fts_main_docs.docs AS d ON t.docid = d.docid
+JOIN fts_main_docs.dict AS dict ON t.termid = dict.termid
+GROUP BY ALL
+ORDER BY ALL
+----
+doc1	0	duck	1
+doc1	1	bark	1
+doc1	1	meow	2
+doc2	0	dog	1
+doc2	1	bark	4
+
+query IIIII
+SELECT num_docs, avgdl, avg_field_lens, total_len, total_field_lens FROM fts_main_docs.stats
+----
+2	4.5	[1.0, 3.5]	9	[2, 7]
+
+query I
+SELECT id FROM (SELECT *, fts_main_docs.match_bm25(id, 'quacking') AS score FROM docs) sq
+WHERE score IS NOT NULL
+----
+
+query I
+SELECT id FROM (SELECT *, fts_main_docs.match_bm25(id, 'meowing') AS score FROM docs) sq
+WHERE score IS NOT NULL
+----
+doc1
+
+# updating only one of the indexed fields
+statement ok
+UPDATE docs SET title = 'puppies dogs' WHERE id = 'doc2'
+
+query III
+SELECT name, len, field_lens FROM fts_main_docs.docs ORDER BY name
+----
+doc1	4	[1, 3]
+doc2	6	[2, 4]
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+bark	2
+dog	1
+duck	1
+meow	1
+puppi	1
+
+# changing the document id renames the indexed document
+statement ok
+UPDATE docs SET id = 'doc3' WHERE id = 'doc1'
+
+query II
+SELECT name, len FROM fts_main_docs.docs ORDER BY name
+----
+doc2	6
+doc3	4
+
+query I
+SELECT id FROM (SELECT *, fts_main_docs.match_bm25(id, 'meowing') AS score FROM docs) sq
+WHERE score IS NOT NULL
+----
+doc3
+
+# an UPDATE that produces duplicate document ids is rejected like an INSERT
+statement error
+UPDATE docs SET id = 'doc2' WHERE id = 'doc3'
+----
+Duplicate key "name: doc2" violates unique constraint
+
+statement error
+UPDATE docs SET id = 'same', title = 'same', body = 'same'
+----
+constraint violation: duplicate key "same"
+
+query II
+SELECT name, len FROM fts_main_docs.docs ORDER BY name
+----
+doc2	6
+doc3	4
+
+query II
+SELECT num_docs, total_len FROM fts_main_docs.stats
+----
+2	10
+
+# drop removes the UPDATE triggers too
+statement ok
+PRAGMA drop_fts_index('docs')
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_%'
+----
+0
+
+statement ok
+UPDATE docs SET body = 'squawking'
+
+# overwriting an incremental index with a static one removes the UPDATE
+# triggers, so later updates do not touch the static index
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'title', 'body', stemmer='porter', stopwords='none', incremental=true)
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'title', 'body', stemmer='porter', stopwords='none', overwrite=true)
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_%'
+----
+0
+
+statement ok
+UPDATE docs SET body = 'hissing'
+
+query II
+SELECT term, df FROM fts_main_docs.dict WHERE term IN ('squawk', 'hiss') ORDER BY term
+----
+squawk	2
