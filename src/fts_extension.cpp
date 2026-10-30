@@ -98,6 +98,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
   ScalarFunction stem_func("stem", {LogicalType::VARCHAR, LogicalType::VARCHAR},
                            LogicalType::VARCHAR, StemFunction);
+  stem_func.SetFallible();
   ScalarFunction opensearch_standard_tokenize_func(
       "fts_tokenize_opensearch_standard", {LogicalType::VARCHAR},
       LogicalType::LIST(LogicalType::VARCHAR),
