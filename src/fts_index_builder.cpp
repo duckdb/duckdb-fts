@@ -62,32 +62,31 @@ static string StopwordsScript(const FTSIndexConfig &config) {
        {"stopwords_table", GetQualifiedTableArgument(config.stopwords_table)}});
 }
 
-static string NormalizeTokenInputExpression(bool strip_accents, bool lower) {
-  string expr = "s::VARCHAR";
-  if (strip_accents) {
-    expr = "strip_accents(" + expr + ")";
-  }
-  if (lower) {
-    expr = "lower(" + expr + ")";
-  }
-  return expr;
-}
-
 static string TokenizeMacroScript(const QualifiedName &qname,
                                   const string &tokenizer, const string &ignore,
-                                  bool strip_accents, bool lower) {
-  auto expr = NormalizeTokenInputExpression(strip_accents, lower);
-  if (tokenizer == "opensearch_standard") {
-    expr = "fts_tokenize_opensearch_standard(" + expr + ")";
-  } else {
-    auto delimiter = "(" + ignore + ")|\\s+";
-    expr = "string_split_regex(" + expr + ", " +
-           SQLString::ToString(delimiter) + ")";
-  }
+                                  bool strip_accents, bool lower,
+                                  bool with_offsets) {
   return RenderSQLTemplate(
       fts_sql::TOKENIZE_MACRO,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
-       {"token_expression", SQLTemplateArgument::TrustedSQL(expr)}});
+       {"macro_name", SQLTemplateArgument::TrustedSQL(
+                          with_offsets ? "tokenize_spans" : "tokenize")},
+       {"tokenize_function",
+        SQLTemplateArgument::TrustedSQL(with_offsets ? "fts_tokenize_spans"
+                                                     : "fts_tokenize")},
+       {"tokenizer", SQLTemplateArgument::StringLiteral(tokenizer)},
+       {"ignore", SQLTemplateArgument::StringLiteral(ignore)},
+       {"strip_accents", SQLTemplateArgument::Boolean(strip_accents)},
+       {"lower", SQLTemplateArgument::Boolean(lower)}});
+}
+
+static string HighlightMacrosScript(const QualifiedName &qname,
+                                    const FTSAnalyzerConfig &config) {
+  return RenderSQLTemplate(
+      fts_sql::HIGHLIGHT_MACROS,
+      {{"fts_schema", GetFTSSchemaArgument(qname)},
+       {"query_analysis_ctes",
+        SQLTemplateArgument::TrustedSQL(RenderQueryAnalysis(qname, config))}});
 }
 
 static string AnalyzeTextMacroScript(const QualifiedName &qname,
@@ -97,7 +96,7 @@ static string AnalyzeTextMacroScript(const QualifiedName &qname,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
        {"analyzed_tokens",
         SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
-            qname, config, AnalyzeTokenStreamProjection::POSITION))}});
+            qname, config, AnalyzeTokenStreamProjection::POSITION_OFFSETS))}});
 }
 
 static string IndexTablesScript(const QualifiedName &qname,
@@ -304,37 +303,11 @@ static string MatchMacroScript(const QualifiedName &qname,
 
 static string LayeredSearchTableMacroScript(const QualifiedName &qname,
                                             const FTSAnalyzerConfig &config) {
-  auto is_final_token =
-      config.filter_stopwords
-          ? ",\n           generate_subscripts(tokens, 1) = len(tokens) "
-            "AS is_final_token"
-          : "";
-  auto phrase_prefix_stopword_token =
-      config.filter_stopwords
-          ? "UNION ALL\n"
-            "    SELECT tokenized.raw_term AS raw_token,\n"
-            "           NULL::VARCHAR AS term,\n"
-            "           tokenized.token_position\n"
-            "    FROM tokenized\n"
-            "    CROSS JOIN params\n"
-            "    WHERE params.query_mode = 'phrase_prefix'\n"
-            "      AND tokenized.is_final_token\n"
-            "      AND tokenized.raw_term IN (\n"
-            "          SELECT sw\n"
-            "          FROM " +
-                GetFTSSchema(qname) +
-                ".stopwords\n"
-                "      )"
-          : "";
   return RenderSQLTemplate(
       fts_sql::SEARCH_LAYERED_BM25,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
-       {"is_final_token", SQLTemplateArgument::TrustedSQL(is_final_token)},
-       {"analyzed_tokens",
-        SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
-            qname, config, AnalyzeTokenStreamProjection::TOKEN_POSITION))},
-       {"phrase_prefix_stopword_token",
-        SQLTemplateArgument::TrustedSQL(phrase_prefix_stopword_token)},
+       {"query_analysis_ctes",
+        SQLTemplateArgument::TrustedSQL(RenderQueryAnalysis(qname, config))},
        {"field_scoring_config_ctes",
         SQLTemplateArgument::TrustedSQL(FieldScoringConfigCTEs(qname))},
        {"field_scoring_score_ctes",
@@ -408,8 +381,11 @@ string FTSIndexBuilder::Create(const FTSIndexConfig &config,
   result += SchemaSetupScript(qname);
   result += StopwordsScript(config);
   result += TokenizeMacroScript(qname, config.tokenizer, config.ignore,
-                                config.strip_accents, config.lower);
+                                config.strip_accents, config.lower, false);
+  result += TokenizeMacroScript(qname, config.tokenizer, config.ignore,
+                                config.strip_accents, config.lower, true);
   result += AnalyzeTextMacroScript(qname, analyzer_config);
+  result += HighlightMacrosScript(qname, analyzer_config);
   result += IndexTablesScript(
       qname, config.input_id, config.input_values, GetFTSBuildTermsTable(qname),
       GetFTSBuildDictTable(qname), GetFTSBuildRawDictTable(qname),

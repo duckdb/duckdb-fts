@@ -14,6 +14,7 @@ struct FTSAnalyzerConfig {
 enum class AnalyzeTokenStreamProjection : uint8_t {
   NONE,
   POSITION,
+  POSITION_OFFSETS,
   DOCID_FIELDID,
   DOCID_FIELDID_POSITION,
   TOKEN_POSITION
@@ -27,6 +28,9 @@ SQLTemplateArgument GetQualifiedTableArgument(const QualifiedName &qname);
 string RenderAnalyzeTokenStream(const QualifiedName &qname,
                                 const FTSAnalyzerConfig &config,
                                 AnalyzeTokenStreamProjection projection);
+
+string RenderQueryAnalysis(const QualifiedName &qname,
+                           const FTSAnalyzerConfig &config);
 
 vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname);
 vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname);
