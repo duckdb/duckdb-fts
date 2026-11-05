@@ -4,10 +4,9 @@
 #include "fts_sql_assets.hpp"
 #include "fts_sql_template.hpp"
 
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
-
-#include <algorithm>
 
 namespace duckdb {
 
@@ -27,35 +26,25 @@ struct TriggerPhase {
 
 static vector<TriggerPhase>
 GetTriggerPhases(const string &input_id, const vector<string> &input_values) {
-  // The document id and the indexed columns, each projected once. DuckDB
-  // identifiers are case-insensitive, so 'id' and 'ID' name the same column.
-  // Projecting both would make the derived table below rename the duplicates
-  // (id, ID, id_1 becomes id, ID_1, id_1_1) and the triggers would then read
-  // the wrong column.
-  vector<string> columns{input_id};
+  // Each column once: identifiers are case-insensitive, and a derived table
+  // renames duplicate columns (id, ID, id_1 becomes id, ID_1, id_1_1), so a
+  // column projected twice would make the triggers read the wrong one.
+  case_insensitive_set_t seen{input_id};
+  vector<string> columns{SQLIdentifier::ToString(input_id)};
   for (auto &input_value : input_values) {
-    auto duplicate =
-        std::any_of(columns.begin(), columns.end(), [&](const string &column) {
-          return StringUtil::CIEquals(column, input_value);
-        });
-    if (!duplicate) {
-      columns.push_back(input_value);
+    if (seen.insert(input_value).second) {
+      columns.push_back(SQLIdentifier::ToString(input_value));
     }
   }
-  vector<string> identifiers;
-  vector<string> bytes;
-  for (auto &column : columns) {
-    identifiers.push_back(SQLIdentifier::ToString(column));
-    // EXCEPT ALL compares a column under its collation, so for VARCHAR
-    // COLLATE nocase it would treat HELLO and hello as the same text although
-    // the analyzer tokenizes them differently. Comparing the bytes of every
-    // value as well reindexes each row whose value changed at all. encode()
-    // takes a VARCHAR, so document ids of other types are cast first.
-    bytes.push_back(
-        StringUtil::Format("encode(%s::VARCHAR)", identifiers.back()));
-  }
-  auto column_list = StringUtil::Join(identifiers, ", ");
-  auto compared_list = column_list + ", " + StringUtil::Join(bytes, ", ");
+  auto column_list = StringUtil::Join(columns, ", ");
+  // EXCEPT ALL compares a collated column under its collation, which for
+  // nocase makes HELLO equal to hello although they tokenize differently. The
+  // rows are therefore also compared by their bytes; encode() takes a VARCHAR
+  // and the document id may be of another type.
+  auto compared_list =
+      StringUtil::Join(columns, columns.size(), ", ", [](const string &column) {
+        return StringUtil::Format("%s, encode(%s::VARCHAR)", column, column);
+      });
   // An UPDATE only has to reindex rows whose document id or indexed text
   // changed. EXCEPT ALL keeps duplicate ids produced by the UPDATE, so the
   // unique index on docs(name) still rejects them as it does for INSERT.
