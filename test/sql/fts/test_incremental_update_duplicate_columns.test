@@ -1,0 +1,204 @@
+# name: test/sql/fts/test_incremental_update_duplicate_columns.test
+# description: UPDATE triggers project each indexed column once, whichever spelling the index was created with
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+foreach options cluster_terms=false cluster_terms=true layered_search=true
+
+statement ok
+CREATE OR REPLACE TABLE docs (id VARCHAR NOT NULL, id_1 VARCHAR)
+
+statement ok
+INSERT INTO docs VALUES
+    ('alpha', 'beta'),
+    ('delta', 'epsilon')
+
+# The document id is indexed again under another spelling. Projecting it twice
+# would make the derived table of changed rows rename the columns to id, ID_1,
+# id_1_1, and the field id_1 would then be read from the document id.
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'ID', 'id_1', stemmer='none', stopwords='none', overwrite=true, incremental=true, {options})
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'ID', 'id_1', stemmer='none', stopwords='none', overwrite=true, {options})
+
+# Every row of either index that is missing from the other one. Ids are not
+# compared because the incremental index assigns fresh docids and termids.
+statement ok
+CREATE OR REPLACE MACRO index_diff() AS TABLE
+WITH actual AS (
+    SELECT 'posting' AS kind, d.name || '/' || t.fieldid || '/' || dict.term AS key, count(*)::VARCHAR AS val
+    FROM fts_main_docs.terms AS t
+    JOIN fts_main_docs.docs AS d USING (docid)
+    JOIN fts_main_docs.dict AS dict USING (termid)
+    GROUP BY ALL
+    UNION ALL
+    SELECT 'dict', term, df::VARCHAR FROM fts_main_docs.dict
+    UNION ALL
+    SELECT 'doc', name, row(len, field_lens)::VARCHAR FROM fts_main_docs.docs
+    UNION ALL
+    SELECT 'stats', '', row(num_docs, round(avgdl, 9), [round(x, 9) FOR x IN avg_field_lens], total_len, total_field_lens)::VARCHAR
+    FROM fts_main_docs.stats
+    UNION ALL
+    SELECT 'bm25', q || '/' || id, round(fts_main_docs.match_bm25(id, q), 9)::VARCHAR
+    FROM docs, (VALUES ('alpha'), ('beta'), ('gamma'), ('omega'), ('zeta')) AS queries(q)
+), expected AS (
+    SELECT 'posting' AS kind, d.name || '/' || t.fieldid || '/' || dict.term AS key, count(*)::VARCHAR AS val
+    FROM fts_main_expected.terms AS t
+    JOIN fts_main_expected.docs AS d USING (docid)
+    JOIN fts_main_expected.dict AS dict USING (termid)
+    GROUP BY ALL
+    UNION ALL
+    SELECT 'dict', term, df::VARCHAR FROM fts_main_expected.dict
+    UNION ALL
+    SELECT 'doc', name, row(len, field_lens)::VARCHAR FROM fts_main_expected.docs
+    UNION ALL
+    SELECT 'stats', '', row(num_docs, round(avgdl, 9), [round(x, 9) FOR x IN avg_field_lens], total_len, total_field_lens)::VARCHAR
+    FROM fts_main_expected.stats
+    UNION ALL
+    SELECT 'bm25', q || '/' || id, round(fts_main_expected.match_bm25(id, q), 9)::VARCHAR
+    FROM expected, (VALUES ('alpha'), ('beta'), ('gamma'), ('omega'), ('zeta')) AS queries(q)
+)
+(SELECT 'missing' AS side, * FROM (FROM expected EXCEPT ALL FROM actual))
+UNION ALL
+(SELECT 'unexpected' AS side, * FROM (FROM actual EXCEPT ALL FROM expected))
+
+query IIII
+FROM index_diff()
+----
+
+# The postings of every document per field
+statement ok
+CREATE OR REPLACE MACRO postings() AS TABLE
+SELECT d.name, f.field, dict.term
+FROM fts_main_docs.terms AS t
+JOIN fts_main_docs.docs AS d USING (docid)
+JOIN fts_main_docs.dict AS dict USING (termid)
+JOIN fts_main_docs.fields AS f USING (fieldid)
+ORDER BY ALL
+
+query III
+FROM postings()
+----
+alpha	ID	alpha
+alpha	id_1	beta
+delta	ID	delta
+delta	id_1	epsilon
+
+# changing the field that shares its name with the renamed duplicate
+statement ok
+UPDATE docs SET id_1 = 'gamma' WHERE id = 'alpha'
+
+query III
+FROM postings()
+----
+alpha	ID	alpha
+alpha	id_1	gamma
+delta	ID	delta
+delta	id_1	epsilon
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+alpha	1
+delta	1
+epsilon	1
+gamma	1
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'gamma') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+alpha
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'beta') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'ID', 'id_1', stemmer='none', stopwords='none', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# changing the document id, which is also an indexed field
+statement ok
+UPDATE docs SET id = 'omega' WHERE id = 'delta'
+
+query III
+FROM postings()
+----
+alpha	ID	alpha
+alpha	id_1	gamma
+omega	ID	omega
+omega	id_1	epsilon
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'ID', 'id_1', stemmer='none', stopwords='none', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# The wildcard indexes every VARCHAR column under its catalog name, including
+# the document id given here under another spelling.
+statement ok
+PRAGMA create_fts_index('docs', 'ID', '*', stemmer='none', stopwords='none', overwrite=true, incremental=true, {options})
+
+query II
+SELECT fieldid, field FROM fts_main_docs.fields ORDER BY fieldid
+----
+0	id
+1	id_1
+
+statement ok
+UPDATE docs SET id_1 = 'zeta' WHERE id = 'alpha'
+
+query III
+FROM postings()
+----
+alpha	id	alpha
+alpha	id_1	zeta
+omega	id	omega
+omega	id_1	epsilon
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'zeta') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+alpha
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'gamma') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'ID', '*', stemmer='none', stopwords='none', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+statement ok
+PRAGMA drop_fts_index('docs')
+
+statement ok
+PRAGMA drop_fts_index('expected')
+
+endloop

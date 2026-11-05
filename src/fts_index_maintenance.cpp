@@ -27,21 +27,42 @@ struct TriggerPhase {
 
 static vector<TriggerPhase>
 GetTriggerPhases(const string &input_id, const vector<string> &input_values) {
-  vector<string> columns{SQLIdentifier::ToString(input_id)};
+  // The document id and the indexed columns, each projected once. DuckDB
+  // identifiers are case-insensitive, so 'id' and 'ID' name the same column.
+  // Projecting both would make the derived table below rename the duplicates
+  // (id, ID, id_1 becomes id, ID_1, id_1_1) and the triggers would then read
+  // the wrong column.
+  vector<string> columns{input_id};
   for (auto &input_value : input_values) {
-    auto column = SQLIdentifier::ToString(input_value);
-    if (std::find(columns.begin(), columns.end(), column) == columns.end()) {
-      columns.push_back(column);
+    auto duplicate =
+        std::any_of(columns.begin(), columns.end(), [&](const string &column) {
+          return StringUtil::CIEquals(column, input_value);
+        });
+    if (!duplicate) {
+      columns.push_back(input_value);
     }
   }
-  auto column_list = StringUtil::Join(columns, ", ");
+  vector<string> identifiers;
+  vector<string> bytes;
+  for (auto &column : columns) {
+    identifiers.push_back(SQLIdentifier::ToString(column));
+    // EXCEPT ALL compares a column under its collation, so for VARCHAR
+    // COLLATE nocase it would treat HELLO and hello as the same text although
+    // the analyzer tokenizes them differently. Comparing the bytes of every
+    // value as well reindexes each row whose value changed at all. encode()
+    // takes a VARCHAR, so document ids of other types are cast first.
+    bytes.push_back(
+        StringUtil::Format("encode(%s::VARCHAR)", identifiers.back()));
+  }
+  auto column_list = StringUtil::Join(identifiers, ", ");
+  auto compared_list = column_list + ", " + StringUtil::Join(bytes, ", ");
   // An UPDATE only has to reindex rows whose document id or indexed text
   // changed. EXCEPT ALL keeps duplicate ids produced by the UPDATE, so the
   // unique index on docs(name) still rejects them as it does for INSERT.
   auto changed_rows = [&](const string &from, const string &other) {
     return StringUtil::Format(
-        "(SELECT %s FROM %s EXCEPT ALL SELECT %s FROM %s)", column_list, from,
-        column_list, other);
+        "(SELECT %s FROM (SELECT %s FROM %s EXCEPT ALL SELECT %s FROM %s))",
+        column_list, compared_list, from, compared_list, other);
   };
   const string update_transition_tables =
       "OLD TABLE AS fts_old_rows NEW TABLE AS fts_new_rows";

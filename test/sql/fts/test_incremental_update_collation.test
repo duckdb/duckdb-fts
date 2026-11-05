@@ -1,0 +1,207 @@
+# name: test/sql/fts/test_incremental_update_collation.test
+# description: UPDATE reindexes collated text whose bytes changed, even when the collation considers old and new text equal
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+foreach options cluster_terms=false cluster_terms=true layered_search=true
+
+statement ok
+CREATE OR REPLACE TABLE docs (id VARCHAR NOT NULL, body VARCHAR COLLATE nocase, note VARCHAR COLLATE noaccent)
+
+statement ok
+INSERT INTO docs VALUES
+    ('d1', 'HELLO', 'cafe'),
+    ('d2', 'world', 'resume')
+
+# The analyzer keeps case and accents, so a change that the collation of the
+# column ignores still changes the indexed terms.
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'body', 'note', stemmer='none', stopwords='none', lower=false, strip_accents=false, overwrite=true, incremental=true, {options})
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'body', 'note', stemmer='none', stopwords='none', lower=false, strip_accents=false, overwrite=true, {options})
+
+# Every row of either index that is missing from the other one. Ids are not
+# compared because the incremental index assigns fresh docids and termids.
+statement ok
+CREATE OR REPLACE MACRO index_diff() AS TABLE
+WITH actual AS (
+    SELECT 'posting' AS kind, d.name || '/' || t.fieldid || '/' || dict.term AS key, count(*)::VARCHAR AS val
+    FROM fts_main_docs.terms AS t
+    JOIN fts_main_docs.docs AS d USING (docid)
+    JOIN fts_main_docs.dict AS dict USING (termid)
+    GROUP BY ALL
+    UNION ALL
+    SELECT 'dict', term, df::VARCHAR FROM fts_main_docs.dict
+    UNION ALL
+    SELECT 'doc', name, row(len, field_lens)::VARCHAR FROM fts_main_docs.docs
+    UNION ALL
+    SELECT 'stats', '', row(num_docs, round(avgdl, 9), [round(x, 9) FOR x IN avg_field_lens], total_len, total_field_lens)::VARCHAR
+    FROM fts_main_docs.stats
+    UNION ALL
+    SELECT 'bm25', q || '/' || id, round(fts_main_docs.match_bm25(id, q), 9)::VARCHAR
+    FROM docs, (VALUES ('HELLO'), ('hello'), ('WORLD'), ('cafe'), ('café'), ('résumé')) AS queries(q)
+), expected AS (
+    SELECT 'posting' AS kind, d.name || '/' || t.fieldid || '/' || dict.term AS key, count(*)::VARCHAR AS val
+    FROM fts_main_expected.terms AS t
+    JOIN fts_main_expected.docs AS d USING (docid)
+    JOIN fts_main_expected.dict AS dict USING (termid)
+    GROUP BY ALL
+    UNION ALL
+    SELECT 'dict', term, df::VARCHAR FROM fts_main_expected.dict
+    UNION ALL
+    SELECT 'doc', name, row(len, field_lens)::VARCHAR FROM fts_main_expected.docs
+    UNION ALL
+    SELECT 'stats', '', row(num_docs, round(avgdl, 9), [round(x, 9) FOR x IN avg_field_lens], total_len, total_field_lens)::VARCHAR
+    FROM fts_main_expected.stats
+    UNION ALL
+    SELECT 'bm25', q || '/' || id, round(fts_main_expected.match_bm25(id, q), 9)::VARCHAR
+    FROM expected, (VALUES ('HELLO'), ('hello'), ('WORLD'), ('cafe'), ('café'), ('résumé')) AS queries(q)
+)
+(SELECT 'missing' AS side, * FROM (FROM expected EXCEPT ALL FROM actual))
+UNION ALL
+(SELECT 'unexpected' AS side, * FROM (FROM actual EXCEPT ALL FROM expected))
+
+query IIII
+FROM index_diff()
+----
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+HELLO	1
+cafe	1
+resume	1
+world	1
+
+# nocase considers HELLO and hello equal, the index must still switch terms
+statement ok
+UPDATE docs SET body = 'hello' WHERE id = 'd1'
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+cafe	1
+hello	1
+resume	1
+world	1
+
+query II
+SELECT name, docid FROM fts_main_docs.docs ORDER BY name
+----
+d1	2
+d2	1
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'hello') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+d1
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'HELLO') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'body', 'note', stemmer='none', stopwords='none', lower=false, strip_accents=false, overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# noaccent considers cafe and café equal
+statement ok
+UPDATE docs SET note = 'café' WHERE id = 'd1'
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+café	1
+hello	1
+resume	1
+world	1
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'café') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+d1
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'cafe') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'body', 'note', stemmer='none', stopwords='none', lower=false, strip_accents=false, overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# several rows and both collated columns change in one statement
+statement ok
+UPDATE docs SET body = upper(body), note = CASE id WHEN 'd2' THEN 'résumé' ELSE note END
+
+query II
+SELECT term, df FROM fts_main_docs.dict ORDER BY term
+----
+HELLO	1
+WORLD	1
+café	1
+résumé	1
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'WORLD') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+d2
+
+query I
+SELECT id FROM (SELECT id, fts_main_docs.match_bm25(id, 'résumé') AS score FROM docs) sq WHERE score IS NOT NULL
+----
+d2
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'body', 'note', stemmer='none', stopwords='none', lower=false, strip_accents=false, overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# writing back the same bytes still leaves the document alone
+query II
+SELECT name, docid FROM fts_main_docs.docs ORDER BY name
+----
+d1	0
+d2	1
+
+statement ok
+UPDATE docs SET body = body, note = note WHERE id = 'd1'
+
+query II
+SELECT name, docid FROM fts_main_docs.docs ORDER BY name
+----
+d1	0
+d2	1
+
+statement ok
+PRAGMA drop_fts_index('docs')
+
+statement ok
+PRAGMA drop_fts_index('expected')
+
+endloop
