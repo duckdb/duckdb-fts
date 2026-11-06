@@ -24,6 +24,12 @@ namespace duckdb {
 static QualifiedName GetQualifiedName(ClientContext &context,
                                       const string &qname_str) {
   auto qname = QualifiedName::Parse(qname_str);
+  if (qname.Path().size() > 3) {
+    throw NotImplementedException(
+        "FTS does not support nested schemas yet: '%s' - use at most "
+        "catalog.schema.table",
+        qname_str);
+  }
   if (qname.Schema().empty()) {
     vector<Identifier> schema_path;
     if (!qname.Catalog().empty()) {
