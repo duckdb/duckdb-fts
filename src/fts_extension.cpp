@@ -103,6 +103,7 @@ static void LoadInternal(ExtensionLoader &loader) {
       "fts_tokenize_opensearch_standard", {LogicalType::VARCHAR},
       LogicalType::LIST(LogicalType::VARCHAR),
       OpenSearchStandardTokenizeFunction);
+  opensearch_standard_tokenize_func.SetFallible();
 
   FunctionSignature create_fts_index_signature;
   create_fts_index_signature.AddParameter("input_table", LogicalType::VARCHAR)

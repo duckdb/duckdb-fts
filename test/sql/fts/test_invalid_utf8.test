@@ -1,0 +1,18 @@
+# name: test/sql/fts/test_invalid_utf8.test
+# description: Functions that decode UTF-8 can be caught by TRY on invalid input
+# group: [fts]
+
+require fts
+
+# fts_render_highlight can split a multibyte character, producing invalid UTF-8
+query I
+WITH broken AS (SELECT fts_render_highlight('é', []::UINTEGER[], []::UINTEGER[], '', '', 1, 2, false, false, '') AS s)
+SELECT TRY(fts_tokenize_opensearch_standard(s)) FROM broken;
+----
+NULL
+
+query I
+WITH broken AS (SELECT fts_render_highlight('é', []::UINTEGER[], []::UINTEGER[], '', '', 1, 2, false, false, '') AS s)
+SELECT TRY(fts_analyze_pattern(s, 'wildcard')) FROM broken;
+----
+NULL

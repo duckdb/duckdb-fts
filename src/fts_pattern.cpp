@@ -404,6 +404,7 @@ ScalarFunction GetFTSAnalyzePatternFunction() {
                           {LogicalType::VARCHAR, LogicalType::VARCHAR},
                           return_type, AnalyzePatternFunction);
   function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+  function.SetFallible();
   return function;
 }
 
