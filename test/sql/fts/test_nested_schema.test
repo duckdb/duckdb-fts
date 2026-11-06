@@ -5,6 +5,9 @@
 require fts
 
 statement ok
+ATTACH ':memory:' AS db
+
+statement ok
 CREATE SCHEMA db.parent
 
 statement ok
