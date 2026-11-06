@@ -6,9 +6,9 @@ FOR EACH STATEMENT
     FROM (
         SELECT t.rawtermid,
                count(DISTINCT t.docid)::BIGINT AS df
-        FROM {{fts_schema}}.terms AS t
-        JOIN {{fts_schema}}.docs AS docs ON docs.docid = t.docid
-        JOIN fts_old_rows AS old_rows ON old_rows.{{input_id}} = docs.name
+        FROM fts_old_rows AS old_rows
+        JOIN {{fts_schema}}.docs AS docs ON docs.name = old_rows.{{input_id}}
+        JOIN {{fts_schema}}.terms AS t ON t.docid = docs.docid
         GROUP BY t.rawtermid
     ) AS deleted_df
     WHERE rd.rawtermid = deleted_df.rawtermid;

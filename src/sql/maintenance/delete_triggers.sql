@@ -6,9 +6,9 @@ FOR EACH STATEMENT
     FROM (
         SELECT t.termid,
                COUNT(DISTINCT t.docid) AS df_delta
-        FROM {{fts_schema}}.terms AS t
-        JOIN {{fts_schema}}.docs AS docs ON t.docid = docs.docid
-        JOIN fts_old_rows AS old_rows ON docs.name = old_rows.{{input_id}}
+        FROM fts_old_rows AS old_rows
+        JOIN {{fts_schema}}.docs AS docs ON docs.name = old_rows.{{input_id}}
+        JOIN {{fts_schema}}.terms AS t ON t.docid = docs.docid
         GROUP BY t.termid
     ) AS deleted_df_delta
     WHERE d.termid = deleted_df_delta.termid;
