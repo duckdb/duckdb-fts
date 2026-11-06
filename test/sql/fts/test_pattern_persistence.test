@@ -14,7 +14,7 @@ statement ok
 SET extension_directory='{TEST_DIR}/pattern_persistence_extensions'
 
 statement ok
-INSTALL '{BUILD_DIRECTORY}/extension/fts/fts.duckdb_extension'
+INSTALL fts FROM '{BUILD_DIRECTORY}/repository'
 
 statement ok
 CREATE TABLE documents(id VARCHAR NOT NULL, body VARCHAR)
