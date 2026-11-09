@@ -35,6 +35,7 @@ jobs:
     with:
       ci_tools_version: v2.0-cyanoptera
       reduced_ci_mode: disabled
+      opt_in_archs: osx_amd64
       groups: |
         main:
           config: extension_config.cmake
