@@ -34,6 +34,7 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/build.yml@v2.0-cyanoptera
     with:
       ci_tools_version: v2.0-cyanoptera
+      reduced_ci_mode: disabled
       groups: |
         main:
           config: extension_config.cmake
