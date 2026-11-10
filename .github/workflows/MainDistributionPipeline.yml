@@ -27,20 +27,6 @@ jobs:
         id: runners
         uses: duckdb/duckdb-ci/detect-runners@main
 
-  # Pin the duckdb build to the commit our submodule references (.github/duckdb-version), instead of
-  # tracking duckdb main — otherwise upstream-main API drift breaks CI on changes unrelated to this repo.
-  get-duckdb-version:
-    name: Get DuckDB version
-    runs-on: ubuntu-latest
-    outputs:
-      duckdb_version: ${{ steps.version.outputs.duckdb_version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github
-      - id: version
-        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
-
   build:
     name: Build extension
     needs: prepare
@@ -70,10 +56,8 @@ jobs:
 
   code-quality-check:
     name: Code Quality Check
-    needs: get-duckdb-version
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       ci_tools_version: main
       extension_name: fts
       format_checks: 'format;tidy'
