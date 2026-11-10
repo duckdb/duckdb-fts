@@ -11,7 +11,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
   cancel-in-progress: true
 
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
 jobs:
+  prepare:
+    name: Prepare
+    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-slim' || 'ubuntu-slim' }}
+    outputs:
+      runners: ${{ steps.runners.outputs.runners }}
+    steps:
+      - name: Detect runners
+        id: runners
+        uses: duckdb/duckdb-ci/detect-runners@main
+
   # Pin the duckdb build to the commit our submodule references (.github/duckdb-version), instead of
   # tracking duckdb main — otherwise upstream-main API drift breaks CI on changes unrelated to this repo.
   get-duckdb-version:
@@ -26,12 +41,16 @@ jobs:
       - id: version
         run: echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
 
-  duckdb-stable-build:
-    name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+  build:
+    name: Build extension
+    needs: prepare
+    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     with:
-      ci_tools_version: main
-      extension_name: fts
+      groups: |
+        main:
+          config: extension_config.cmake
+          toolchain: main
+      runners: ${{ needs.prepare.outputs.runners }}
 
   fts-regression:
     name: FTS regression benchmarks
@@ -39,16 +58,15 @@ jobs:
     with:
       git_ref: ${{ github.sha }}
 
-  duckdb-stable-deploy:
-    name: Deploy extension binaries
-    needs:
-      - duckdb-stable-build
-      - fts-regression
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+  deploy:
+    name: Deploy extension
+    needs: [build, fts-regression]
+    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@main
     secrets: inherit
     with:
-      ci_tools_version: main
-      extension_name: fts
+      duckdb_version: ${{ needs.build.outputs.duckdb_version }}
+      duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
+      deploy_extensions: fts
 
   code-quality-check:
     name: Code Quality Check
