@@ -246,6 +246,18 @@ jobs:
             -f benchmark/fts/layered_autocomplete/report_index_footprint.sql \
             2>&1 | tee phrase-footprint.log
 
+      - name: Fail on confirmed query regressions
+        run: |
+          status=0
+          for log in layered-regression.log autocomplete-regression.log field-scoring-regression.log boolean-regression.log phrase-regression.log; do
+            result="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep '^result:' | tail -1 || true)"
+            if [[ "$result" =~ [0-9]+\ query\ regressions? ]]; then
+              echo "::error title=Benchmark query regression::${log%.log}: ${BASH_REMATCH[0]}"
+              status=1
+            fi
+          done
+          exit "$status"
+
       - name: Add timing output to job summary
         if: always()
         run: |
