@@ -24,7 +24,15 @@ namespace duckdb {
 static QualifiedName GetQualifiedName(ClientContext &context,
                                       const string &qname_str) {
   auto qname = QualifiedName::Parse(qname_str);
-  if (qname.Path().size() > 3) {
+  auto &path = qname.Path();
+  // a.b.c is a nested schema in the default catalog, when `a` is not a catalog
+  bool nested =
+      path.size() > 3 ||
+      (path.size() == 3 && !Catalog::GetCatalogEntry(context, path[0]) &&
+       Catalog::GetSchema(context, Identifier(),
+                          vector<Identifier>{path[0], path[1]},
+                          OnEntryNotFound::RETURN_NULL));
+  if (nested) {
     throw NotImplementedException(
         "FTS does not support nested schemas yet: '%s' - use at most "
         "catalog.schema.table",
