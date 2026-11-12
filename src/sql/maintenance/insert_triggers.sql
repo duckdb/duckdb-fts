@@ -63,9 +63,9 @@ FOR EACH STATEMENT
     FROM (
         SELECT t.termid,
                COUNT(DISTINCT t.docid) AS df_delta
-        FROM {{fts_schema}}.terms AS t
-        JOIN {{fts_schema}}.docs AS docs ON t.docid = docs.docid
-        JOIN {{new_rows}} AS new_rows ON docs.name = new_rows.{{input_id}}
+        FROM {{new_rows}} AS new_rows
+        JOIN {{fts_schema}}.docs AS docs ON docs.name = new_rows.{{input_id}}
+        JOIN {{fts_schema}}.terms AS t ON t.docid = docs.docid
         GROUP BY t.termid
     ) AS inserted_df_delta
     WHERE d.termid = inserted_df_delta.termid;

@@ -66,7 +66,6 @@ jobs:
         env:
           BUILD_BENCHMARK: 1
           DISABLE_SANITIZER: 1
-          EXTENSION_FLAGS: -DLINK_FTS_STATICALLY=1
           GEN: ninja
         run: |
           make release
@@ -159,7 +158,7 @@ jobs:
               echo "PATTERN_BENCHMARKS=.github/regression/fts_pattern.csv"
               echo "NEAR_BENCHMARKS=.github/regression/fts_near.csv"
               echo "FOOTPRINT_ROWS=50000"
-              echo "BENCHMARK_BUDGET_SECONDS=600"
+              echo "BENCHMARK_BUDGET_SECONDS=3000"
             } >> "$GITHUB_ENV"
           fi
 
@@ -178,54 +177,42 @@ jobs:
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$LAYERED_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee layered-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$AUTOCOMPLETE_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee autocomplete-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$FIELD_SCORING_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee field-scoring-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$BOOLEAN_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee boolean-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$OLD_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$PHRASE_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --verbose 2>&1 | tee phrase-regression.log
 
             python3 duckdb/scripts/regression/test_runner.py \
               --old "$NEW_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$ANALYZER_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee analyzer-smoke.log
 
@@ -233,9 +220,7 @@ jobs:
               --old "$NEW_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$PATTERN_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee pattern-smoke.log
 
@@ -243,9 +228,7 @@ jobs:
               --old "$NEW_RUNNER" \
               --new "$NEW_RUNNER" \
               --benchmarks "$NEAR_BENCHMARKS" \
-              --root-dir . \
               --threads 2 \
-              --clear-benchmark-cache \
               --nofail \
               --verbose 2>&1 | tee near-smoke.log
           }
@@ -262,6 +245,18 @@ jobs:
             fts-phrase-footprint.duckdb \
             -f benchmark/fts/layered_autocomplete/report_index_footprint.sql \
             2>&1 | tee phrase-footprint.log
+
+      - name: Fail on confirmed query regressions
+        run: |
+          status=0
+          for log in layered-regression.log autocomplete-regression.log field-scoring-regression.log boolean-regression.log phrase-regression.log; do
+            result="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep '^result:' | tail -1 || true)"
+            if [[ "$result" =~ [0-9]+\ query\ regressions? ]]; then
+              echo "::error title=Benchmark query regression::${log%.log}: ${BASH_REMATCH[0]}"
+              status=1
+            fi
+          done
+          exit "$status"
 
       - name: Add timing output to job summary
         if: always()

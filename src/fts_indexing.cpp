@@ -3,6 +3,7 @@
 #include "fts_index_common.hpp"
 #include "fts_index_maintenance.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
@@ -23,14 +24,34 @@ namespace duckdb {
 static QualifiedName GetQualifiedName(ClientContext &context,
                                       const string &qname_str) {
   auto qname = QualifiedName::Parse(qname_str);
+  auto &path = qname.Path();
+  // a.b.c is a nested schema in the default catalog, when `a` is not a catalog
+  bool nested =
+      path.size() > 3 ||
+      (path.size() == 3 && !Catalog::GetCatalogEntry(context, path[0]) &&
+       Catalog::GetSchema(context, Identifier(),
+                          vector<Identifier>{path[0], path[1]},
+                          OnEntryNotFound::RETURN_NULL));
+  if (nested) {
+    throw NotImplementedException(
+        "FTS does not support nested schemas yet: '%s' - use at most "
+        "catalog.schema.table",
+        qname_str);
+  }
   if (qname.Schema().empty()) {
     vector<Identifier> schema_path;
     if (!qname.Catalog().empty()) {
       schema_path.push_back(qname.Catalog());
     }
-    schema_path.push_back(
+    auto default_schema =
         ClientData::Get(context).catalog_search_path->GetDefaultSchema(
-            context, qname.Catalog()));
+            context, qname.Catalog());
+    if (!default_schema) {
+      throw CatalogException("cannot resolve '%s' - catalog '%s' has no "
+                             "default schema, qualify the name with a schema",
+                             qname_str, qname.Catalog().GetIdentifierName());
+    }
+    schema_path.push_back(*default_schema);
     qname = qname.WithQualification(std::move(schema_path));
   }
   return qname;
