@@ -12,26 +12,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Pin the duckdb build to the commit our submodule references (.github/duckdb-version), instead of
-  # tracking duckdb main — otherwise upstream-main API drift breaks CI on changes unrelated to this repo.
-  get-duckdb-version:
-    name: Get DuckDB version
+  check-duckdb-version:
+    name: Check DuckDB version
     runs-on: ubuntu-latest
-    outputs:
-      duckdb_version: ${{ steps.version.outputs.duckdb_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: .github
-      - id: version
-        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
+      - name: Check .github/duckdb-version matches the duckdb submodule
+        run: |
+          pinned="$(cat .github/duckdb-version)"
+          submodule="$(git ls-tree HEAD duckdb | awk '{print $3}')"
+          if [[ "$pinned" != "$submodule" ]]; then
+            echo "::error file=.github/duckdb-version::.github/duckdb-version ($pinned) does not match the duckdb submodule ($submodule)"
+            exit 1
+          fi
 
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    needs: check-duckdb-version
+    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@v2.0-cyanoptera
     with:
-      ci_tools_version: main
-      extension_name: fts
+      ci_tools_version: v2.0-cyanoptera
+      reduced_ci_mode: disabled
+      opt_in_archs: osx_amd64
+      groups: |
+        main:
+          config: extension_config.cmake
+          toolchain: main
 
   fts-regression:
     name: FTS regression benchmarks
@@ -44,18 +52,18 @@ jobs:
     needs:
       - duckdb-stable-build
       - fts-regression
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@v2.0-cyanoptera
     secrets: inherit
     with:
-      ci_tools_version: main
-      extension_name: fts
+      duckdb_version: ${{ needs.duckdb-stable-build.outputs.duckdb_version }}
+      duckdb_commit: ${{ needs.duckdb-stable-build.outputs.duckdb_commit }}
+      ci_tools_version: v2.0-cyanoptera
+      deploy_extensions: fts
 
   code-quality-check:
     name: Code Quality Check
-    needs: get-duckdb-version
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v2.0-cyanoptera
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
-      ci_tools_version: main
+      ci_tools_version: v2.0-cyanoptera
       extension_name: fts
       format_checks: 'format;tidy'

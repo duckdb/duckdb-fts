@@ -382,6 +382,7 @@ template <bool WITH_OFFSETS> static ScalarFunction GetTokenizeFunction() {
       LogicalType::LIST(element_type), TokenizeFunction<WITH_OFFSETS>);
   function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
   function.SetInitStateCallback(InitTokenizeState);
+  function.SetFallible();
   return function;
 }
 

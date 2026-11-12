@@ -1,0 +1,67 @@
+# name: test/sql/fts/test_nested_schema.test
+# description: Test that FTS rejects nested schemas
+# group: [fts]
+
+require fts
+
+statement ok
+ATTACH ':memory:' AS db
+
+statement ok
+CREATE SCHEMA parent
+
+statement ok
+CREATE SCHEMA parent.child
+
+statement ok
+CREATE TABLE parent.child.docs AS SELECT 1 AS id, 'nestedterm' AS body
+
+# a three-part name can also be a nested schema in the default catalog
+statement error
+PRAGMA create_fts_index('parent.child.docs', 'id', 'body', stemmer='none', stopwords='none')
+----
+FTS does not support nested schemas yet
+
+statement error
+PRAGMA drop_fts_index('parent.child.docs')
+----
+FTS does not support nested schemas yet
+
+statement ok
+CREATE SCHEMA db.parent
+
+statement ok
+CREATE SCHEMA db.parent.child
+
+statement ok
+CREATE SCHEMA db.child
+
+statement ok
+CREATE TABLE db.parent.child.docs AS SELECT 1 AS id, 'nestedterm' AS body
+
+statement ok
+CREATE TABLE db.child.docs AS SELECT 2 AS id, 'otherterm' AS body
+
+statement error
+PRAGMA create_fts_index('db.parent.child.docs', 'id', 'body', stemmer='none', stopwords='none')
+----
+FTS does not support nested schemas yet
+
+statement error
+PRAGMA create_fts_index('db.child.docs', 'id', 'body', stopwords='db.parent.child.docs')
+----
+FTS does not support nested schemas yet
+
+statement ok
+PRAGMA create_fts_index('db.child.docs', 'id', 'body', stemmer='none', stopwords='none')
+
+# dropping via the nested name shouldn't touch the index of db.child.docs
+statement error
+PRAGMA drop_fts_index('db.parent.child.docs')
+----
+FTS does not support nested schemas yet
+
+query I
+SELECT term FROM db.fts_child_docs.dict
+----
+otherterm
