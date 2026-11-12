@@ -32,12 +32,25 @@ string RenderAnalyzeTokenStream(const QualifiedName &qname,
 string RenderQueryAnalysis(const QualifiedName &qname,
                            const FTSAnalyzerConfig &config);
 
-vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname);
-vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname);
-vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname);
-vector<string> GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname);
-vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname);
-vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname);
+// Trigger names are "__fts_<schema>_<infix>_<NN>_<step>". DuckDB fires the
+// triggers of one event in name order, so the infix groups the steps that run
+// for an event ("ai" for INSERT, "ad" for DELETE, and "au_del" followed by
+// "au_ins" for UPDATE) and the step number orders them within a group.
+static constexpr const char *FTS_UPDATE_DELETE_TRIGGER_INFIX = "au_del";
+static constexpr const char *FTS_UPDATE_INSERT_TRIGGER_INFIX = "au_ins";
+
+vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname,
+                                        const string &infix = "ai");
+vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname,
+                                                 const string &infix = "ai");
+vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname,
+                                        const string &infix = "ad");
+vector<string> GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname,
+                                                 const string &infix = "ad");
+vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname,
+                                               const string &infix = "ai");
+vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname,
+                                               const string &infix = "ad");
 vector<string> GetFTSTriggerNames(const QualifiedName &qname);
 
 string GetFTSBuildTermsTable(const QualifiedName &qname);

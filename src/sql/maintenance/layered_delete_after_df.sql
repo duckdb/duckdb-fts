@@ -1,5 +1,5 @@
-CREATE TRIGGER {{trigger_21_term_prefixes_prune}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_21_term_prefixes_prune}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     DELETE FROM {{fts_schema}}.term_prefixes
     WHERE rawtermid IN (
@@ -8,8 +8,8 @@ FOR EACH STATEMENT
         WHERE rd.df = 0
     );
 
-CREATE TRIGGER {{trigger_21_raw_term_grams_prune}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_21_raw_term_grams_prune}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     DELETE FROM {{fts_schema}}.raw_term_grams
     WHERE rawtermid IN (
@@ -18,14 +18,14 @@ FOR EACH STATEMENT
         WHERE rd.df = 0
     );
 
-CREATE TRIGGER {{trigger_22_raw_dict_prune}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_22_raw_dict_prune}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     DELETE FROM {{fts_schema}}.raw_dict
     WHERE df = 0;
 
-CREATE TRIGGER {{trigger_23_term_stats_df}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_23_term_stats_df}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     UPDATE {{fts_schema}}.term_stats AS ts
     SET df = d.df
@@ -35,8 +35,8 @@ FOR EACH STATEMENT
           {{affected_termids}}
       );
 
-CREATE TRIGGER {{trigger_24_term_stats_by_len_df}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_24_term_stats_by_len_df}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     UPDATE {{fts_schema}}.term_stats_by_len AS ts
     SET df = d.df
@@ -46,8 +46,8 @@ FOR EACH STATEMENT
           {{affected_termids}}
       );
 
-CREATE TRIGGER {{trigger_25_term_grams_prune}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_25_term_grams_prune}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     DELETE FROM {{fts_schema}}.term_grams
     WHERE termid IN (
@@ -59,8 +59,8 @@ FOR EACH STATEMENT
           )
     );
 
-CREATE TRIGGER {{trigger_26_term_stats_by_len_prune}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_26_term_stats_by_len_prune}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     DELETE FROM {{fts_schema}}.term_stats_by_len
     WHERE termid IN (
@@ -72,8 +72,8 @@ FOR EACH STATEMENT
           )
     );
 
-CREATE TRIGGER {{trigger_27_term_stats_prune}} AFTER DELETE ON {{input_table}}
-REFERENCING OLD TABLE AS fts_old_rows
+CREATE TRIGGER {{trigger_27_term_stats_prune}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     DELETE FROM {{fts_schema}}.term_stats
     WHERE termid IN (

@@ -216,7 +216,7 @@ query I
 SELECT count(*) FROM duckdb_triggers()
 WHERE trigger_name LIKE '__fts_fts_main_drop_clustered_docs_%'
 ----
-10
+20
 
 statement ok
 PRAGMA drop_fts_index('drop_clustered_docs')
@@ -268,7 +268,7 @@ SELECT
     (SELECT count(*) FROM duckdb_views() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND view_name = 'terms'),
     (SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_fts_main_overwrite_clustered_docs_%')
 ----
-1	0	10
+1	0	20
 
 statement ok
 PRAGMA create_fts_index('overwrite_clustered_docs', 'id', 'body', stemmer='none', stopwords='none', overwrite=true, incremental=true, cluster_terms=true)
@@ -279,7 +279,7 @@ SELECT
     (SELECT count(*) FROM duckdb_views() WHERE schema_name = 'fts_main_overwrite_clustered_docs' AND view_name = 'terms'),
     (SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_fts_main_overwrite_clustered_docs_%')
 ----
-1	1	10
+1	1	20
 
 statement ok
 INSERT INTO overwrite_clustered_docs VALUES ('doc2', 'aardvark alpha')

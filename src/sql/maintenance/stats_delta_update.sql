@@ -20,6 +20,6 @@ FROM (
            coalesce(sum(docs.len), 0)::HUGEINT AS total_len,
            {{delta_field_lengths}}
     FROM {{fts_schema}}.docs AS docs
-    JOIN {{transition_table}} AS changed_rows
+    JOIN {{changed_rows}} AS changed_rows
       ON docs.name = changed_rows.{{input_id}}
 ) AS delta

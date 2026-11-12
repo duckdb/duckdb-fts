@@ -1,5 +1,5 @@
-CREATE TRIGGER {{trigger_15_term_stats}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_15_term_stats}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.term_stats (termid, term, df, term_len, gram_count)
     {{token_ctes}},
@@ -25,8 +25,8 @@ FOR EACH STATEMENT
       )
     ORDER BY affected_terms.termid;
 
-CREATE TRIGGER {{trigger_16_term_stats_by_len}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_16_term_stats_by_len}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.term_stats_by_len (termid, term, df, term_len, gram_count)
     {{token_ctes}},
@@ -51,8 +51,8 @@ FOR EACH STATEMENT
              ts.df,
              ts.termid;
 
-CREATE TRIGGER {{trigger_17_term_grams}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_17_term_grams}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.term_grams (gram, termid)
     {{token_ctes}},
@@ -83,8 +83,8 @@ FOR EACH STATEMENT
     ORDER BY grams.gram,
              grams.termid;
 
-CREATE TRIGGER {{trigger_18_raw_dict}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_18_raw_dict}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.raw_dict (rawtermid, raw_term, termid, df)
     {{token_ctes}},
@@ -111,8 +111,8 @@ FOR EACH STATEMENT
 
 -- Trigger 18 inserts new raw terms with df = 0. The sidecar triggers consume
 -- those rows before trigger 37 updates their document frequencies.
-CREATE TRIGGER {{trigger_19_term_prefixes}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_19_term_prefixes}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.term_prefixes (prefix_len, prefix, rawtermid)
     WITH
@@ -132,8 +132,8 @@ FOR EACH STATEMENT
              prefix,
              affected_raw_terms.rawtermid;
 
-CREATE TRIGGER {{trigger_19_raw_term_grams}} AFTER INSERT ON {{input_table}}
-REFERENCING NEW TABLE AS fts_new_rows
+CREATE TRIGGER {{trigger_19_raw_term_grams}} AFTER {{trigger_event}} ON {{input_table}}
+REFERENCING {{transition_tables}}
 FOR EACH STATEMENT
     INSERT INTO {{fts_schema}}.raw_term_grams (gram, rawtermid)
     WITH

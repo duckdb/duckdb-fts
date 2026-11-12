@@ -22,7 +22,7 @@ PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none'
 query I
 SELECT count(*) FROM duckdb_triggers() WHERE trigger_name LIKE '__fts_%'
 ----
-10
+20
 
 statement ok
 PRAGMA create_fts_index('docs', 'id', 'body', stemmer='porter', stopwords='none', overwrite=true)
