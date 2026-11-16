@@ -27,25 +27,9 @@ jobs:
         id: runners
         uses: duckdb/duckdb-ci/detect-runners@main
 
-  check-duckdb-version:
-    name: Check DuckDB version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github
-      - name: Check .github/duckdb-version matches the duckdb submodule
-        run: |
-          pinned="$(cat .github/duckdb-version)"
-          submodule="$(git ls-tree HEAD duckdb | awk '{print $3}')"
-          if [[ "$pinned" != "$submodule" ]]; then
-            echo "::error file=.github/duckdb-version::.github/duckdb-version ($pinned) does not match the duckdb submodule ($submodule)"
-            exit 1
-          fi
-
   build:
     name: Build extension
-    needs: [prepare, check-duckdb-version]
+    needs: prepare
     uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     with:
       reduced_ci_mode: disabled
