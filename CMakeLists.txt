@@ -50,7 +50,8 @@ set(FTS_SQL_ASSETS
     "TOKENIZE_DELETED_FIELD|src/sql/maintenance/tokenize_deleted_field.sql"
     "DELETE_TOKEN_CTES|src/sql/maintenance/delete_token_ctes.sql"
     "DELETE_TRIGGERS|src/sql/maintenance/delete_triggers.sql"
-    "CLUSTERED_DELETE_TRIGGERS|src/sql/maintenance/clustered_delete_triggers.sql")
+    "CLUSTERED_DELETE_TRIGGERS|src/sql/maintenance/clustered_delete_triggers.sql"
+)
 include(cmake/GenerateFTSSQLAssets.cmake)
 generate_fts_sql_assets("${FTS_SQL_GENERATED_DIR}" ${FTS_SQL_ASSETS})
 
@@ -61,14 +62,15 @@ else()
   set(DUCKDB_SOURCE_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/duckdb")
 endif()
 include_directories(
-    ${EXTENSION_BASE_FOLDER}/include
-    ${FTS_SQL_GENERATED_DIR}
-    ${SNOWBALL_BASE_FOLDER}/include
-    ${SNOWBALL_BASE_FOLDER}/libstemmer
-    ${SNOWBALL_BASE_FOLDER}/runtime
-    ${DUCKDB_SOURCE_BASE_FOLDER}/third_party/utf8proc/include)
+  ${EXTENSION_BASE_FOLDER}/include
+  ${FTS_SQL_GENERATED_DIR}
+  ${SNOWBALL_BASE_FOLDER}/include
+  ${SNOWBALL_BASE_FOLDER}/libstemmer
+  ${SNOWBALL_BASE_FOLDER}/runtime
+  ${DUCKDB_SOURCE_BASE_FOLDER}/third_party/utf8proc/include)
 
-file(GLOB SNOWBALL_STEMMER_SOURCES CONFIGURE_DEPENDS ${SNOWBALL_BASE_FOLDER}/src_c/stem_*.c)
+file(GLOB SNOWBALL_STEMMER_SOURCES CONFIGURE_DEPENDS
+     ${SNOWBALL_BASE_FOLDER}/src_c/stem_*.c)
 
 set(EXTENSION_SOURCES
     ${EXTENSION_BASE_FOLDER}/fts_extension.cpp
