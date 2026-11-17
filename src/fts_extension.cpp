@@ -211,29 +211,28 @@ static void LoadInternal(ExtensionLoader &loader) {
 
   FunctionSignature create_fts_index_signature;
   create_fts_index_signature.AddParameter("input_table", LogicalType::VARCHAR)
-	  .AddParameter("input_id", LogicalType::VARCHAR)
-	  .AddArgs("input_values", LogicalType::VARCHAR)
-	  .WithTypedKwargs("options", [&](TypedKwargs &options) {
-		  options.Add("stemmer", LogicalType::VARCHAR)
-		      .Add("tokenizer", LogicalType::VARCHAR)
-		      .Add("stopwords", LogicalType::VARCHAR)
-		      .Add("ignore", LogicalType::VARCHAR)
-		      .Add("strip_accents", LogicalType::BOOLEAN)
-		      .Add("lower", LogicalType::BOOLEAN)
-		      .Add("overwrite", LogicalType::BOOLEAN)
-		      .Add("incremental", LogicalType::BOOLEAN)
-		      .Add("cluster_terms", LogicalType::BOOLEAN)
-		      .Add("layered_search", LogicalType::BOOLEAN);
-	  });
+      .AddParameter("input_id", LogicalType::VARCHAR)
+      .AddArgs("input_values", LogicalType::VARCHAR)
+      .WithTypedKwargs("options", [&](TypedKwargs &options) {
+        options.Add("stemmer", LogicalType::VARCHAR)
+            .Add("tokenizer", LogicalType::VARCHAR)
+            .Add("stopwords", LogicalType::VARCHAR)
+            .Add("ignore", LogicalType::VARCHAR)
+            .Add("strip_accents", LogicalType::BOOLEAN)
+            .Add("lower", LogicalType::BOOLEAN)
+            .Add("overwrite", LogicalType::BOOLEAN)
+            .Add("incremental", LogicalType::BOOLEAN)
+            .Add("cluster_terms", LogicalType::BOOLEAN)
+            .Add("layered_search", LogicalType::BOOLEAN);
+      });
   auto create_fts_index_func = PragmaFunction::PragmaCall(
       "create_fts_index", FTSIndexing::CreateFTSIndexQuery,
       std::move(create_fts_index_signature));
 
   FunctionSignature input_table_signature;
   input_table_signature.AddParameter("input_table", LogicalType::VARCHAR);
-  auto drop_fts_index_func =
-      PragmaFunction::PragmaCall("drop_fts_index", FTSIndexing::DropFTSIndexQuery,
-                                 input_table_signature);
+  auto drop_fts_index_func = PragmaFunction::PragmaCall(
+      "drop_fts_index", FTSIndexing::DropFTSIndexQuery, input_table_signature);
   auto create_fts_boolean_query_macros_func = PragmaFunction::PragmaCall(
       "create_fts_boolean_query_macros",
       FTSIndexing::CreateFTSBooleanQueryMacrosQuery, input_table_signature);
