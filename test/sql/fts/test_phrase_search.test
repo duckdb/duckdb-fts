@@ -10,6 +10,10 @@ require json
 
 require no_alternative_verify
 
+# autoload json first: create_fts_index only registers the _query macros when json is loaded
+statement ok
+SELECT json_valid('{}')
+
 statement ok
 CREATE TABLE phrase_docs(
     id VARCHAR NOT NULL,
