@@ -10,6 +10,10 @@ require json
 
 require no_alternative_verify
 
+# autoload json first: create_fts_index only registers the _query macros when json is loaded
+statement ok
+SELECT json_valid('{}')
+
 # The native analyzer preserves Unicode literal lengths and extracts the same
 # indexed prefix or gram used by the relational candidate path.
 query TTT
