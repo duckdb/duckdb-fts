@@ -1,0 +1,143 @@
+# name: test/sql/fts/test_incremental_update_layered.test
+# description: UPDATE keeps layered search sidecars equal to a rebuilt index
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE docs (id VARCHAR NOT NULL, title VARCHAR, body VARCHAR)
+
+statement ok
+INSERT INTO docs VALUES
+    ('d1', 'Quacking ducks', 'quacking quacker quacks'),
+    ('d2', 'Barking', 'barking barked 2024'),
+    ('d3', NULL, 'meowing cats')
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'title', 'body', stemmer='porter', stopwords='none', incremental=true, layered_search=true)
+
+statement ok
+CREATE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', stopwords='none', layered_search=true)
+
+# Every sidecar row of either index that is missing from the other one, keyed
+# by terms instead of the termids and rawtermids the two indexes assign.
+statement ok
+CREATE MACRO layered_diff() AS TABLE
+WITH actual AS (
+    SELECT 'position' AS kind, row(docs.name, t.fieldid, dict.term, rd.raw_term, t.position)::VARCHAR AS val
+    FROM fts_main_docs.terms AS t
+    JOIN fts_main_docs.docs AS docs USING (docid)
+    JOIN fts_main_docs.dict AS dict USING (termid)
+    JOIN fts_main_docs.raw_dict AS rd USING (rawtermid)
+    UNION ALL
+    SELECT 'raw_dict', row(rd.raw_term, dict.term, rd.df)::VARCHAR
+    FROM fts_main_docs.raw_dict AS rd JOIN fts_main_docs.dict AS dict USING (termid)
+    UNION ALL
+    SELECT 'term_stats', row(term, df, term_len, gram_count)::VARCHAR FROM fts_main_docs.term_stats
+    UNION ALL
+    SELECT 'term_stats_by_len', row(term, df, term_len, gram_count)::VARCHAR FROM fts_main_docs.term_stats_by_len
+    UNION ALL
+    SELECT 'term_grams', row(tg.gram, dict.term)::VARCHAR
+    FROM fts_main_docs.term_grams AS tg JOIN fts_main_docs.dict AS dict USING (termid)
+    UNION ALL
+    SELECT 'term_prefixes', row(tp.prefix_len, tp.prefix, rd.raw_term)::VARCHAR
+    FROM fts_main_docs.term_prefixes AS tp JOIN fts_main_docs.raw_dict AS rd USING (rawtermid)
+    UNION ALL
+    SELECT 'raw_term_grams', row(rtg.gram, rd.raw_term)::VARCHAR
+    FROM fts_main_docs.raw_term_grams AS rtg JOIN fts_main_docs.raw_dict AS rd USING (rawtermid)
+    UNION ALL
+    SELECT 'search', row(q, docname, round(score, 9))::VARCHAR
+    FROM (VALUES ('quack'), ('bark'), ('meow'), ('2024'), ('parrot')) AS queries(q),
+         fts_main_docs.search_layered_bm25(q, top_k := NULL)
+), expected AS (
+    SELECT 'position' AS kind, row(docs.name, t.fieldid, dict.term, rd.raw_term, t.position)::VARCHAR AS val
+    FROM fts_main_expected.terms AS t
+    JOIN fts_main_expected.docs AS docs USING (docid)
+    JOIN fts_main_expected.dict AS dict USING (termid)
+    JOIN fts_main_expected.raw_dict AS rd USING (rawtermid)
+    UNION ALL
+    SELECT 'raw_dict', row(rd.raw_term, dict.term, rd.df)::VARCHAR
+    FROM fts_main_expected.raw_dict AS rd JOIN fts_main_expected.dict AS dict USING (termid)
+    UNION ALL
+    SELECT 'term_stats', row(term, df, term_len, gram_count)::VARCHAR FROM fts_main_expected.term_stats
+    UNION ALL
+    SELECT 'term_stats_by_len', row(term, df, term_len, gram_count)::VARCHAR FROM fts_main_expected.term_stats_by_len
+    UNION ALL
+    SELECT 'term_grams', row(tg.gram, dict.term)::VARCHAR
+    FROM fts_main_expected.term_grams AS tg JOIN fts_main_expected.dict AS dict USING (termid)
+    UNION ALL
+    SELECT 'term_prefixes', row(tp.prefix_len, tp.prefix, rd.raw_term)::VARCHAR
+    FROM fts_main_expected.term_prefixes AS tp JOIN fts_main_expected.raw_dict AS rd USING (rawtermid)
+    UNION ALL
+    SELECT 'raw_term_grams', row(rtg.gram, rd.raw_term)::VARCHAR
+    FROM fts_main_expected.raw_term_grams AS rtg JOIN fts_main_expected.raw_dict AS rd USING (rawtermid)
+    UNION ALL
+    SELECT 'search', row(q, docname, round(score, 9))::VARCHAR
+    FROM (VALUES ('quack'), ('bark'), ('meow'), ('2024'), ('parrot')) AS queries(q),
+         fts_main_expected.search_layered_bm25(q, top_k := NULL)
+)
+(SELECT 'missing' AS side, * FROM (FROM expected EXCEPT ALL FROM actual))
+UNION ALL
+(SELECT 'unexpected' AS side, * FROM (FROM actual EXCEPT ALL FROM expected))
+
+query III
+FROM layered_diff()
+----
+
+# replace raw terms that share a stem
+statement ok
+UPDATE docs SET body = 'quacked parrots' WHERE id = 'd1'
+
+statement ok
+UPDATE docs SET body = 'barking parroting' WHERE id = 'd2'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', stopwords='none', overwrite=true, layered_search=true)
+
+query III
+FROM layered_diff()
+----
+
+# reorder words, which only changes positions
+statement ok
+UPDATE docs SET body = 'parrots quacked' WHERE id = 'd1'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', stopwords='none', overwrite=true, layered_search=true)
+
+query III
+FROM layered_diff()
+----
+
+# change ids and text of several documents at once
+statement ok
+UPDATE docs SET id = id || 'x', title = 'Meowing 2024' WHERE id IN ('d2', 'd3')
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', stopwords='none', overwrite=true, layered_search=true)
+
+query III
+FROM layered_diff()
+----
+
+query II
+SELECT docname, rank FROM fts_main_docs.search_layered_bm25('parrot', top_k := NULL) ORDER BY rank
+----
+d1	1
+d2x	2

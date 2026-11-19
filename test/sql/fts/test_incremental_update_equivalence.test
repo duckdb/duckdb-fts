@@ -1,0 +1,225 @@
+# name: test/sql/fts/test_incremental_update_equivalence.test
+# description: After every UPDATE an incremental index matches an index rebuilt from scratch
+# group: [fts]
+
+require skip_reload
+
+require fts
+
+require no_alternative_verify
+
+foreach options cluster_terms=false cluster_terms=true layered_search=true
+
+statement ok
+CREATE OR REPLACE TABLE docs (id VARCHAR NOT NULL, title VARCHAR, body VARCHAR, views INTEGER)
+
+statement ok
+INSERT INTO docs VALUES
+    ('d1', 'Quacking ducks', 'the duck quacks loudly', 0),
+    ('d2', 'Barking dogs', 'dogs bark at ducks', 0),
+    ('d3', NULL, 'cats meow', 0),
+    ('d4', 'Mixed', 'ducks dogs cats', 0),
+    ('d5', 'Empty', '', 0)
+
+statement ok
+PRAGMA create_fts_index('docs', 'id', 'title', 'body', stemmer='porter', overwrite=true, incremental=true, {options})
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+# Every row of either index that is missing from the other one. Ids are not
+# compared because the incremental index assigns fresh docids and termids.
+statement ok
+CREATE OR REPLACE MACRO index_diff() AS TABLE
+WITH actual AS (
+    SELECT 'posting' AS kind, d.name || '/' || t.fieldid || '/' || dict.term AS key, count(*)::VARCHAR AS val
+    FROM fts_main_docs.terms AS t
+    JOIN fts_main_docs.docs AS d USING (docid)
+    JOIN fts_main_docs.dict AS dict USING (termid)
+    GROUP BY ALL
+    UNION ALL
+    SELECT 'dict', term, df::VARCHAR FROM fts_main_docs.dict
+    UNION ALL
+    SELECT 'doc', name, row(len, field_lens)::VARCHAR FROM fts_main_docs.docs
+    UNION ALL
+    SELECT 'stats', '', row(num_docs, round(avgdl, 9), [round(x, 9) FOR x IN avg_field_lens], total_len, total_field_lens)::VARCHAR
+    FROM fts_main_docs.stats
+    UNION ALL
+    SELECT 'bm25', q || '/' || id, round(fts_main_docs.match_bm25(id, q), 9)::VARCHAR
+    FROM docs, (VALUES ('duck'), ('dogs bark'), ('cats'), ('parrots squawk'), ('extra')) AS queries(q)
+), expected AS (
+    SELECT 'posting' AS kind, d.name || '/' || t.fieldid || '/' || dict.term AS key, count(*)::VARCHAR AS val
+    FROM fts_main_expected.terms AS t
+    JOIN fts_main_expected.docs AS d USING (docid)
+    JOIN fts_main_expected.dict AS dict USING (termid)
+    GROUP BY ALL
+    UNION ALL
+    SELECT 'dict', term, df::VARCHAR FROM fts_main_expected.dict
+    UNION ALL
+    SELECT 'doc', name, row(len, field_lens)::VARCHAR FROM fts_main_expected.docs
+    UNION ALL
+    SELECT 'stats', '', row(num_docs, round(avgdl, 9), [round(x, 9) FOR x IN avg_field_lens], total_len, total_field_lens)::VARCHAR
+    FROM fts_main_expected.stats
+    UNION ALL
+    SELECT 'bm25', q || '/' || id, round(fts_main_expected.match_bm25(id, q), 9)::VARCHAR
+    FROM expected, (VALUES ('duck'), ('dogs bark'), ('cats'), ('parrots squawk'), ('extra')) AS queries(q)
+)
+(SELECT 'missing' AS side, * FROM (FROM expected EXCEPT ALL FROM actual))
+UNION ALL
+(SELECT 'unexpected' AS side, * FROM (FROM actual EXCEPT ALL FROM expected))
+
+query IIII
+FROM index_diff()
+----
+
+# change the text of one document
+statement ok
+UPDATE docs SET body = 'parrots squawk' WHERE id = 'd1'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# set every indexed field of a document to NULL
+statement ok
+UPDATE docs SET title = NULL, body = NULL WHERE id = 'd2'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# change a document id
+statement ok
+UPDATE docs SET id = 'd9' WHERE id = 'd3'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# swap the ids of two documents in one statement
+statement ok
+UPDATE docs SET id = CASE id WHEN 'd4' THEN 'd5' ELSE 'd4' END WHERE id IN ('d4', 'd5')
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# update every row, including rows whose new text is still NULL
+statement ok
+UPDATE docs SET body = body || ' extra words'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# remove the last document containing a term so it is pruned from the dict
+statement ok
+UPDATE docs SET title = 'Nothing', body = 'cats' WHERE id IN ('d4', 'd5')
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+# updates of non-indexed columns, unchanged values, and no matching rows
+statement ok
+UPDATE docs SET views = views + 1
+
+statement ok
+UPDATE docs SET body = body, title = title
+
+statement ok
+UPDATE docs SET body = 'never' WHERE id = 'missing'
+
+query IIII
+FROM index_diff()
+----
+
+# a rolled back UPDATE leaves the index untouched
+statement ok
+BEGIN
+
+statement ok
+UPDATE docs SET body = 'rolled back text', id = id || '_rb'
+
+statement ok
+ROLLBACK
+
+query IIII
+FROM index_diff()
+----
+
+# UPDATE interleaved with INSERT and DELETE in one transaction
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO docs VALUES ('d10', 'New duck', 'ducks quack', 0)
+
+statement ok
+UPDATE docs SET body = 'dogs dogs dogs', id = 'd11' WHERE id = 'd10'
+
+statement ok
+DELETE FROM docs WHERE id = 'd1'
+
+statement ok
+UPDATE docs SET title = 'Quacking parrots' WHERE id = 'd11'
+
+statement ok
+COMMIT
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM docs
+
+statement ok
+PRAGMA create_fts_index('expected', 'id', 'title', 'body', stemmer='porter', overwrite=true, {options})
+
+query IIII
+FROM index_diff()
+----
+
+statement ok
+PRAGMA drop_fts_index('docs')
+
+statement ok
+PRAGMA drop_fts_index('expected')
+
+endloop

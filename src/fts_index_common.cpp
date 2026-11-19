@@ -107,33 +107,43 @@ string RenderQueryAnalysis(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(trailing_stopword)}});
 }
 
-vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname) {
-  auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
+static string GetFTSTriggerPrefix(const QualifiedName &qname,
+                                  const string &infix) {
+  return StringUtil::Format("__fts_%s_%s_", GetFTSSchemaName(qname), infix);
+}
+
+vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname,
+                                        const string &infix) {
+  auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_docs", prefix + "10_dict_insert", prefix + "20_terms",
           prefix + "30_dict_df", prefix + "40_stats"};
 }
 
-vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname) {
-  auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
+vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname,
+                                                 const string &infix) {
+  auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_docs", prefix + "10_dict_insert",
           prefix + "20_terms_store", prefix + "30_dict_df",
           prefix + "40_stats"};
 }
 
-vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname) {
-  auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
+vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname,
+                                        const string &infix) {
+  auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_dict_df", prefix + "10_terms", prefix + "15_stats",
           prefix + "20_docs", prefix + "30_dict_prune"};
 }
 
-vector<string> GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname) {
-  auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
+vector<string> GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname,
+                                                 const string &infix) {
+  auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_dict_df", prefix + "10_terms_store", prefix + "15_stats",
           prefix + "20_docs", prefix + "30_dict_prune"};
 }
 
-vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname) {
-  auto prefix = StringUtil::Format("__fts_%s_ai_", GetFTSSchemaName(qname));
+vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname,
+                                               const string &infix) {
+  auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "15_term_stats",    prefix + "16_term_stats_by_len",
           prefix + "17_term_grams",    prefix + "18_raw_dict",
           prefix + "19_term_prefixes", prefix + "19_raw_term_grams",
@@ -141,8 +151,9 @@ vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname) {
           prefix + "37_raw_dict_df"};
 }
 
-vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname) {
-  auto prefix = StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
+vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname,
+                                               const string &infix) {
+  auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {
       prefix + "05_raw_dict_df",          prefix + "21_term_prefixes_prune",
       prefix + "21_raw_term_grams_prune", prefix + "22_raw_dict_prune",
@@ -152,19 +163,22 @@ vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname) {
 }
 
 vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
-  auto result = GetFTSInsertTriggerNames(qname);
+  vector<string> result;
   auto append = [&](vector<string> names) {
     result.insert(result.end(), names.begin(), names.end());
   };
-  append(GetFTSLayeredInsertTriggerNames(qname));
-  append(GetFTSDeleteTriggerNames(qname));
-  append(GetFTSClusteredInsertTriggerNames(qname));
-  append(GetFTSClusteredDeleteTriggerNames(qname));
-  append(GetFTSLayeredDeleteTriggerNames(qname));
+  for (const string insert_infix : {"ai", FTS_UPDATE_INSERT_TRIGGER_INFIX}) {
+    append(GetFTSInsertTriggerNames(qname, insert_infix));
+    append(GetFTSLayeredInsertTriggerNames(qname, insert_infix));
+    append(GetFTSClusteredInsertTriggerNames(qname, insert_infix));
+  }
+  for (const string delete_infix : {"ad", FTS_UPDATE_DELETE_TRIGGER_INFIX}) {
+    append(GetFTSDeleteTriggerNames(qname, delete_infix));
+    append(GetFTSClusteredDeleteTriggerNames(qname, delete_infix));
+    append(GetFTSLayeredDeleteTriggerNames(qname, delete_infix));
+  }
   // Indexes created before delta statistics used this delete trigger name.
-  auto delete_prefix =
-      StringUtil::Format("__fts_%s_ad_", GetFTSSchemaName(qname));
-  result.push_back(delete_prefix + "40_stats");
+  result.push_back(GetFTSTriggerPrefix(qname, "ad") + "40_stats");
   return result;
 }
 
