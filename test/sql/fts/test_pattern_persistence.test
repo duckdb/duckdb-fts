@@ -10,6 +10,10 @@ require no_alternative_verify
 
 load {TEST_DIR}/pattern_persistence.db
 
+# autoload json first: create_fts_index only registers the _query macros when json is loaded
+statement ok
+SELECT json_valid('{}')
+
 statement ok
 SET extension_directory='{TEST_DIR}/pattern_persistence_extensions'
 
