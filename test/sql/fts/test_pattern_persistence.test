@@ -8,6 +8,8 @@ require json
 
 require no_alternative_verify
 
+require no_extension_autoloading "EXPECTED: Test installs fts from the build directory into its own extension directory"
+
 load {TEST_DIR}/pattern_persistence.db
 
 # autoload json first: create_fts_index only registers the _query macros when json is loaded
